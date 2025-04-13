@@ -1,130 +1,192 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>BB弾の軌跡検出デモ</title>
-  <style>
-    video, canvas {
-      border: 1px solid black;
-    }
-  </style>
-</head>
-<body>
-  <h1>BB弾の軌跡検出</h1>
-  <p>カメラから映像を取得して、飛翔しているBB弾の軌跡を表示する例です。<br>
-  ※高速移動する物体の検出は条件によって難しい場合があります。</p>
-  <!-- カメラ映像表示用のvideoタグ -->
-  <video id="videoInput" width="640" height="480" autoplay muted></video>
-  <!-- 結果表示用のcanvasタグ -->
-  <canvas id="canvasOutput" width="640" height="480"></canvas>
-  
-  <!-- OpenCV.jsの読み込み (公式CDNより) -->
-  <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
-  <script type="text/javascript">
-    // DOM要素の取得
-    const video = document.getElementById('videoInput');
-    const canvas = document.getElementById('canvasOutput');
-    const ctx = canvas.getContext('2d');
-
-    // 軌跡を記録する配列
-    let trajectory = [];
-
-    // 前フレーム用Mat
-    let prevFrame = null;
-    let streaming = false;
-
-    // カメラ映像の取得 (映像のみ)
-    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-      .then(function(stream) {
-        video.srcObject = stream;
-        video.play();
-      })
-      .catch(function(err) {
-        console.log("カメラ取得エラー: " + err);
+  <head>
+    <meta charset="UTF-8">
+    <title>BB弾軌跡追跡デモ</title>
+    <style>
+      body { font-family: sans-serif; text-align: center; }
+      video, canvas { display: block; margin: 10px auto; }
+      #controls { margin: 10px; }
+      #maxResolutionInfo { margin-top: 5px; font-size: 0.9em; color: #555; }
+    </style>
+  </head>
+  <body>
+    <h2>BB弾軌跡追跡デモ</h2>
+    <div id="controls">
+      <label for="cameraSelect">カメラ選択:</label>
+      <select id="cameraSelect"></select>
+      &nbsp;&nbsp;
+      <label for="frameRateInput">フレームレート (fps):</label>
+      <input type="number" id="frameRateInput" min="1" value="30" style="width:60px;">
+      &nbsp;&nbsp;
+      <label for="resPercentInput">解像度 (%):</label>
+      <input type="number" id="resPercentInput" min="1" max="100" value="100" style="width:60px;">
+      &nbsp;&nbsp;
+      <button id="startButton">開始</button>
+      <div id="maxResolutionInfo"></div>
+    </div>
+    
+    <!-- カメラ映像（内部利用：Canvas に描画） -->
+    <video id="video" autoplay muted playsinline style="display:none;"></video>
+    <!-- 描画用キャンバス -->
+    <canvas id="outputCanvas"></canvas>
+    
+    <script>
+      const video = document.getElementById('video');
+      const outputCanvas = document.getElementById('outputCanvas');
+      const canvasCtx = outputCanvas.getContext('2d');
+      const cameraSelect = document.getElementById('cameraSelect');
+      const frameRateInput = document.getElementById('frameRateInput');
+      const resPercentInput = document.getElementById('resPercentInput');
+      const startButton = document.getElementById('startButton');
+      const maxResolutionInfo = document.getElementById('maxResolutionInfo');
+      
+      let lastFrameData = null;
+      // 軌跡の点を保存する配列（{x, y}）
+      let trajectory = [];
+      
+      // 動体検出の際の輝度差の閾値（必要に応じて調整）
+      const MOTION_THRESHOLD = 40; 
+      // 検出対象の面積が一定以上の場合のみ弾とみなす（ノイズ除去のため）
+      const MIN_BLOB_SIZE = 3; 
+      
+      // 利用可能なカメラを列挙する
+      async function enumerateCameras() {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices.filter(device => device.kind === 'videoinput');
+          cameraSelect.innerHTML = '';
+          videoDevices.forEach((device, index) => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.text = device.label || `カメラ ${index + 1}`;
+            cameraSelect.appendChild(option);
+          });
+        } catch (error) {
+          console.error('カメラの列挙に失敗:', error);
+        }
+      }
+      
+      // 選択したカメラで、指定解像度・フレームレートで映像を取得する
+      async function startCamera() {
+        const selectedDeviceId = cameraSelect.value;
+        // 制約なしで一旦ストリーム取得してcapabilities調査
+        const tempConstraints = { video: { deviceId: { exact: selectedDeviceId } } };
+        let tempStream;
+        try {
+          tempStream = await navigator.mediaDevices.getUserMedia(tempConstraints);
+        } catch (error) {
+          console.error('初回ストリーム取得に失敗:', error);
+          return;
+        }
+        
+        const videoTrack = tempStream.getVideoTracks()[0];
+        const capabilities = videoTrack.getCapabilities();
+        let maxWidth = (capabilities.width && capabilities.width.max) || 640;
+        let maxHeight = (capabilities.height && capabilities.height.max) || 480;
+        maxResolutionInfo.innerText = `このカメラの最大解像度: ${maxWidth} x ${maxHeight}`;
+        tempStream.getTracks().forEach(track => track.stop());
+        
+        const resPercent = parseInt(resPercentInput.value) || 100;
+        const desiredWidth = Math.floor(maxWidth * (resPercent / 100));
+        const desiredHeight = Math.floor(maxHeight * (resPercent / 100));
+        const frameRate = parseInt(frameRateInput.value) || 30;
+        
+        const constraints = {
+          video: {
+            deviceId: { exact: selectedDeviceId },
+            width: { exact: desiredWidth },
+            height: { exact: desiredHeight },
+            frameRate: { ideal: frameRate }
+          }
+        };
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          video.srcObject = stream;
+          return new Promise(resolve => {
+            video.onloadedmetadata = () => {
+              outputCanvas.width = video.videoWidth;
+              outputCanvas.height = video.videoHeight;
+              video.play();
+              resolve();
+            };
+          });
+        } catch (error) {
+          console.error('カメラ映像の取得に失敗:', error);
+        }
+      }
+      
+      // 毎フレームごとの処理：フレーム差分で動き（弾）を検出し、軌跡描画
+      function processFrame() {
+        // 現在の映像をキャンバスに描画
+        canvasCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+        const frame = canvasCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height);
+        const currentData = frame.data;
+        
+        let motionX = 0, motionY = 0, motionCount = 0;
+        
+        // 前フレームがあれば差分を計算
+        if (lastFrameData) {
+          for (let i = 0; i < currentData.length; i += 4) {
+            // RGBの平均値で輝度とみなす
+            const r = currentData[i];
+            const g = currentData[i+1];
+            const b = currentData[i+2];
+            const currentGray = (r + g + b) / 3;
+            
+            const rLast = lastFrameData[i];
+            const gLast = lastFrameData[i+1];
+            const bLast = lastFrameData[i+2];
+            const lastGray = (rLast + gLast + bLast) / 3;
+            
+            if (Math.abs(currentGray - lastGray) > MOTION_THRESHOLD) {
+              // ピクセル番号から x,y 座標を計算
+              const pixelIndex = i / 4;
+              const x = pixelIndex % outputCanvas.width;
+              const y = Math.floor(pixelIndex / outputCanvas.width);
+              motionX += x;
+              motionY += y;
+              motionCount++;
+            }
+          }
+        }
+        
+        // 過去のフレームを更新
+        lastFrameData = new Uint8ClampedArray(currentData);
+        
+        // 動きがあればその中心座標を計算し軌跡として記録
+        if (motionCount > MIN_BLOB_SIZE) {
+          const centerX = motionX / motionCount;
+          const centerY = motionY / motionCount;
+          trajectory.push({ x: centerX, y: centerY });
+        }
+        
+        // キャンバス上に軌跡を描画（直近の点同士をラインで結ぶ）
+        if (trajectory.length > 1) {
+          canvasCtx.beginPath();
+          canvasCtx.lineWidth = 2;
+          canvasCtx.strokeStyle = 'red';
+          canvasCtx.moveTo(trajectory[0].x, trajectory[0].y);
+          for (let i = 1; i < trajectory.length; i++) {
+            canvasCtx.lineTo(trajectory[i].x, trajectory[i].y);
+          }
+          canvasCtx.stroke();
+        }
+        
+        // 次のフレーム処理
+        requestAnimationFrame(processFrame);
+      }
+      
+      // スタートボタン押下時の処理
+      startButton.addEventListener('click', async () => {
+        // 軌跡や前フレームの初期化
+        trajectory = [];
+        lastFrameData = null;
+        await startCamera();
+        processFrame();
       });
-
-    // OpenCV.jsがロード完了したときに呼び出される関数
-    function onOpenCvReady() {
-      console.log('OpenCV.jsのロードが完了しました');
-      video.addEventListener("playing", () => {
-        streaming = true;
-        processVideo();
-      }, false);
-    }
-
-    function processVideo() {
-      if (!streaming) return;  // ストリーミング停止時は処理しない
-
-      // 動画のキャプチャ用オブジェクト
-      let cap = new cv.VideoCapture(video);
-      // 現在のフレームをMatに読み込み（4チャンネル RGBA）
-      let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
-      cap.read(src);
-
-      // グレースケール変換
-      let gray = new cv.Mat();
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-      // 初回フレームの場合はprevFrameにコピー
-      if (prevFrame === null) {
-        prevFrame = gray.clone();
-      }
-
-      // フレーム間の差分計算（動いている部分を抽出）
-      let diff = new cv.Mat();
-      cv.absdiff(gray, prevFrame, diff);
-      let thresh = new cv.Mat();
-      // 差分画像に閾値処理（値は環境に合わせて調整）
-      cv.threshold(diff, thresh, 50, 255, cv.THRESH_BINARY);
-
-      // 輪郭検出
-      let contours = new cv.MatVector();
-      let hierarchy = new cv.Mat();
-      cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      // 各輪郭をチェックし、BB弾とみなせるものの重心を算出
-      for (let i = 0; i < contours.size(); i++) {
-        let cnt = contours.get(i);
-        let area = cv.contourArea(cnt);
-        // 小さすぎるノイズまたは大きすぎるものは除外（面積条件は実際の環境に合わせて調整）
-        if (area > 5 && area < 500) {
-          let moments = cv.moments(cnt, false);
-          let cx = moments.m10 / moments.m00;
-          let cy = moments.m01 / moments.m00;
-          // 重心を軌跡に追加
-          trajectory.push({ x: cx, y: cy });
-          // 動体の位置に円を描画（デバッグ目的）
-          cv.circle(src, new cv.Point(cx, cy), 5, [255, 0, 0, 255], 2);
-        }
-        cnt.delete();
-      }
-      hierarchy.delete();
-      contours.delete();
-
-      // キャンバスにカメラ映像を描画
-      ctx.drawImage(video, 0, 0, video.width, video.height);
-      // 軌跡線を描画
-      ctx.beginPath();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = 'red';
-      if (trajectory.length > 0) {
-        ctx.moveTo(trajectory[0].x, trajectory[0].y);
-        for (let i = 1; i < trajectory.length; i++){
-          ctx.lineTo(trajectory[i].x, trajectory[i].y);
-        }
-      }
-      ctx.stroke();
-
-      // 前フレームを更新するために現在のgrayをコピー（以降処理で削除するので注意）
-      if (prevFrame) prevFrame.delete();
-      prevFrame = gray.clone();
-
-      // 次フレーム処理のための遅延（30ms程度で約30fps、必要に応じて調整）
-      setTimeout(processVideo, 30);
-
-      // 使用済みMatの解放（メモリリーク防止）
-      src.delete(); diff.delete(); thresh.delete(); gray.delete();
-    }
-  </script>
-</body>
+      
+      enumerateCameras();
+    </script>
+  </body>
 </html>
