@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>BB弾の軌跡検出デモ</title>
+  <style>
+    video, canvas {
+      border: 1px solid black;
+    }
+  </style>
+</head>
+<body>
+  <h1>BB弾の軌跡検出</h1>
+  <p>カメラから映像を取得して、飛翔しているBB弾の軌跡を表示する例です。<br>
+  ※高速移動する物体の検出は条件によって難しい場合があります。</p>
+  <!-- カメラ映像表示用のvideoタグ -->
+  <video id="videoInput" width="640" height="480" autoplay muted></video>
+  <!-- 結果表示用のcanvasタグ -->
+  <canvas id="canvasOutput" width="640" height="480"></canvas>
+  
+  <!-- OpenCV.jsの読み込み (公式CDNより) -->
+  <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+  <script type="text/javascript">
+    // DOM要素の取得
+    const video = document.getElementById('videoInput');
+    const canvas = document.getElementById('canvasOutput');
+    const ctx = canvas.getContext('2d');
+
+    // 軌跡を記録する配列
+    let trajectory = [];
+
+    // 前フレーム用Mat
+    let prevFrame = null;
+    let streaming = false;
+
+    // カメラ映像の取得 (映像のみ)
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then(function(stream) {
+        video.srcObject = stream;
+        video.play();
+      })
+      .catch(function(err) {
+        console.log("カメラ取得エラー: " + err);
+      });
+
+    // OpenCV.jsがロード完了したときに呼び出される関数
+    function onOpenCvReady() {
+      console.log('OpenCV.jsのロードが完了しました');
+      video.addEventListener("playing", () => {
+        streaming = true;
+        processVideo();
+      }, false);
+    }
+
+    function processVideo() {
+      if (!streaming) return;  // ストリーミング停止時は処理しない
+
+      // 動画のキャプチャ用オブジェクト
+      let cap = new cv.VideoCapture(video);
+      // 現在のフレームをMatに読み込み（4チャンネル RGBA）
+      let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
+      cap.read(src);
+
+      // グレースケール変換
+      let gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+      // 初回フレームの場合はprevFrameにコピー
+      if (prevFrame === null) {
+        prevFrame = gray.clone();
+      }
+
+      // フレーム間の差分計算（動いている部分を抽出）
+      let diff = new cv.Mat();
+      cv.absdiff(gray, prevFrame, diff);
+      let thresh = new cv.Mat();
+      // 差分画像に閾値処理（値は環境に合わせて調整）
+      cv.threshold(diff, thresh, 50, 255, cv.THRESH_BINARY);
+
+      // 輪郭検出
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+      cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      // 各輪郭をチェックし、BB弾とみなせるものの重心を算出
+      for (let i = 0; i < contours.size(); i++) {
+        let cnt = contours.get(i);
+        let area = cv.contourArea(cnt);
+        // 小さすぎるノイズまたは大きすぎるものは除外（面積条件は実際の環境に合わせて調整）
+        if (area > 5 && area < 500) {
+          let moments = cv.moments(cnt, false);
+          let cx = moments.m10 / moments.m00;
+          let cy = moments.m01 / moments.m00;
+          // 重心を軌跡に追加
+          trajectory.push({ x: cx, y: cy });
+          // 動体の位置に円を描画（デバッグ目的）
+          cv.circle(src, new cv.Point(cx, cy), 5, [255, 0, 0, 255], 2);
+        }
+        cnt.delete();
+      }
+      hierarchy.delete();
+      contours.delete();
+
+      // キャンバスにカメラ映像を描画
+      ctx.drawImage(video, 0, 0, video.width, video.height);
+      // 軌跡線を描画
+      ctx.beginPath();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'red';
+      if (trajectory.length > 0) {
+        ctx.moveTo(trajectory[0].x, trajectory[0].y);
+        for (let i = 1; i < trajectory.length; i++){
+          ctx.lineTo(trajectory[i].x, trajectory[i].y);
+        }
+      }
+      ctx.stroke();
+
+      // 前フレームを更新するために現在のgrayをコピー（以降処理で削除するので注意）
+      if (prevFrame) prevFrame.delete();
+      prevFrame = gray.clone();
+
+      // 次フレーム処理のための遅延（30ms程度で約30fps、必要に応じて調整）
+      setTimeout(processVideo, 30);
+
+      // 使用済みMatの解放（メモリリーク防止）
+      src.delete(); diff.delete(); thresh.delete(); gray.delete();
+    }
+  </script>
+</body>
+</html>
