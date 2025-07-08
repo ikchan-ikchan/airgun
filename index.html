@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Workerクラスタ検出デモ</title>
+  <title>Workerクラスタ検出付き差分解析</title>
   <style>
     body { margin:0; padding:0; background:#000; display:flex; flex-direction:column; align-items:center; color:#fff; min-height:100vh; font-family:sans-serif; }
+    h1 { margin:10px 0 6px 0; font-size:20px; }
     #container { position:relative; width:100%; max-width:960px; aspect-ratio:16/9; background:#000; }
     canvas { position:absolute; top:0; left:0; width:100%; height:100%; cursor:crosshair; }
     #videoElement { display:none; }
@@ -13,15 +14,28 @@
     #controls { margin-bottom:10px; display:flex; gap:10px; align-items:center; }
     label { font-size:16px; }
     #selectMsg { color:#ff8; font-size:16px; margin:6px 0 0 0; }
+    #modeSelect { background:#222; color:#fff; border:none; border-radius:8px; padding:5px 12px; font-size:16px; margin-left:8px; }
+    #progressBar { width:320px; height:10px; background:#444; margin:10px 0 0 0; border-radius:5px; overflow:hidden; display:none; }
+    #progressBarInner { height:100%; background:#3cf; transition:width 0.1s; width:0; }
+    #fileFpsDisplay { margin-left:10px; color:#0cf; font-size:15px; user-select:text; min-width:80px; display:inline-block; }
     #paramBar { margin:0 0 8px 0; display:flex; gap:14px; flex-wrap:wrap; align-items:center; padding:4px 10px; border-radius:10px; background:#111; font-size:15px; }
     #paramBar label { min-width:60px; }
+    #paramBar input[type="range"] { width:70px; vertical-align:middle; }
+    #framePlayerBar { width:600px; max-width:98vw; margin:8px 0 6px 0; display:flex; align-items:center; gap:10px; visibility:hidden; }
+    #frameSlider { flex:1; min-width:120px; }
+    #framePlayerBar button { background:#333; color:#fff; border:none; border-radius:5px; padding:2px 9px; font-size:17px; cursor:pointer; }
+    #framePlayerBar button:active { background:#555; }
+    #frameInfo { font-size:15px; min-width:70px; }
+    #analyzeBar { width:600px; max-width:98vw; margin:12px 0 2px 0; display:flex; align-items:center; gap:8px; visibility:hidden; }
+    #analyzeSlider { flex:1; min-width:120px; }
+    #analyzeInfo { font-size:15px; min-width:140px;}
     #circleBar { margin:0 0 8px 0; display:flex; gap:16px; flex-wrap:wrap; align-items:center; padding:4px 10px; border-radius:10px; background:#111; font-size:15px;}
     #circleBar label { min-width:60px; }
     #circleRadiusNum, #circleFillRatioNum { width:38px; }
   </style>
 </head>
 <body>
-  <h1>Worker+クラスタ最長パス抽出デモ</h1>
+  <h1>Workerクラスタ検出付き差分解析</h1>
   <div id="paramBar" style="margin-bottom:2px;">
     <span style="color:#888;">処理パラメータ（円埋めと閾値は下で調整）</span>
   </div>
@@ -38,13 +52,37 @@
   </div>
   <div id="controls">
     <button id="cameraBtn">カメラ</button>
+    <label>
+      <input type="file" id="fileInput" accept="video/*" style="display:none;">
+      <span id="fileLabel" style="background:#222;padding:4px 10px;border-radius:8px;cursor:pointer;">録画ファイル選択</span>
+    </label>
+    <span id="selectedFileName" style="font-size:14px;"></span>
+    <select id="modeSelect" style="display:none;">
+      <option value="realtime">リアルタイム</option>
+      <option value="allframe">全フレーム</option>
+    </select>
+    <span id="fileFpsDisplay"></span>
   </div>
+  <div id="analyzeBar">
+    <span>解析開始位置：</span>
+    <input type="range" id="analyzeSlider" min="0" max="0" value="0">
+    <span id="analyzeInfo"></span>
+    <button id="analyzeBtn">この位置から3秒解析</button>
+  </div>
+  <div id="progressBar"><div id="progressBarInner"></div></div>
   <div id="container">
     <video id="videoElement" autoplay playsinline></video>
     <canvas id="canvasVideo"></canvas>
     <canvas id="canvasOverlay"></canvas>
     <canvas id="canvasRect"></canvas>
     <div id="fpsDisplay"></div>
+  </div>
+  <div id="framePlayerBar">
+    <button id="playPauseBtn">▶️</button>
+    <button id="prevBtn">⏮️</button>
+    <button id="nextBtn">⏭️</button>
+    <input type="range" id="frameSlider" min="0" max="0" value="0">
+    <span id="frameInfo"></span>
   </div>
   <div id="selectMsg"></div>
   <p id="errorMsg"></p>
@@ -56,6 +94,10 @@
     const circleFillRatioNum = document.getElementById("circleFillRatioNum");
     let highlightRadius = 10;
     let highlightFillRatio = 50;
+
+    // Worker生成
+    const worker = new Worker("clustering-worker.js");
+
     function syncCircleParams() {
       highlightRadius = Number(circleRadius.value || circleRadiusNum.value);
       highlightFillRatio = Number(circleFillRatio.value || circleFillRatioNum.value);
@@ -73,15 +115,38 @@
     const errorMsg = document.getElementById('errorMsg');
     const fpsDisplay = document.getElementById('fpsDisplay');
     const cameraBtn = document.getElementById('cameraBtn');
+    const fileInput = document.getElementById('fileInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const selectedFileName = document.getElementById('selectedFileName');
     const selectMsg = document.getElementById('selectMsg');
-    let width = 1920, height = 1080, rect=null;
+    const modeSelect = document.getElementById('modeSelect');
+    const fileFpsDisplay = document.getElementById('fileFpsDisplay');
+    const progressBar = document.getElementById('progressBar');
+    const progressBarInner = document.getElementById('progressBarInner');
+    const framePlayerBar = document.getElementById('framePlayerBar');
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const frameSlider = document.getElementById('frameSlider');
+    const frameInfo = document.getElementById('frameInfo');
+    const analyzeBar = document.getElementById('analyzeBar');
+    const analyzeSlider = document.getElementById('analyzeSlider');
+    const analyzeInfo = document.getElementById('analyzeInfo');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    let processing = false, stopProcessingFlag = false, videoSource = 'camera';
+    let selectedFileURL = null;
+    let width = 1920, height = 1080;
+    let rect = null;
+    let lastDetectedFps = null;
     let realtimeLoopId = null;
 
-    // Worker生成
-    const worker = new Worker("clustering-worker.js");
+    // Worker結果一時保持
+    let latestResult = null;
+
+    // Worker受信→描画
     worker.onmessage = function(e) {
-      if(e.data.type==="result") {
-        // 描画
+      if (e.data.type === "result") {
+        latestResult = e.data;
         drawOverlay(e.data.circles, e.data.paths);
       }
     };
@@ -130,9 +195,62 @@
 
     cameraBtn.onclick = () => {
       stopCurrentProcessing();
+      videoSource = 'camera';
+      selectedFileName.textContent = '';
+      fileInput.value = '';
+      rect = null;
+      selectMsg.textContent = '';
+      modeSelect.style.display = "none";
+      fileFpsDisplay.textContent = "";
+      progressBar.style.display = "none";
+      framePlayerBar.style.visibility = "hidden";
+      analyzeBar.style.visibility = "hidden";
       startCamera();
     };
-
+    fileLabel.onclick = () => fileInput.click();
+    fileInput.onchange = () => {
+      stopCurrentProcessing();
+      fileFpsDisplay.textContent = "";
+      lastDetectedFps = null;
+      if (fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        selectedFileName.textContent = file.name;
+        videoSource = 'file';
+        if (selectedFileURL) URL.revokeObjectURL(selectedFileURL);
+        selectedFileURL = URL.createObjectURL(file);
+        rect = null;
+        selectMsg.textContent = '';
+        modeSelect.style.display = "";
+        progressBar.style.display = "none";
+        framePlayerBar.style.visibility = "hidden";
+        analyzeBar.style.visibility = "hidden";
+        modeSelect.value = "realtime";
+        startVideoFile(selectedFileURL);
+      } else {
+        selectedFileName.textContent = '';
+        modeSelect.style.display = "none";
+        progressBar.style.display = "none";
+        framePlayerBar.style.visibility = "hidden";
+        analyzeBar.style.visibility = "hidden";
+      }
+    };
+    modeSelect.onchange = () => {
+      if (modeSelect.value === "allframe" && lastDetectedFps != null) {
+        fileFpsDisplay.textContent = `この動画の推定fps: ${lastDetectedFps.toFixed(2)}`;
+      } else {
+        fileFpsDisplay.textContent = "";
+      }
+      if (videoSource === 'file' && modeSelect.value === "allframe" && lastDetectedFps) {
+        analyzeBar.style.visibility = "visible";
+        setupAnalyzeBar();
+      } else {
+        analyzeBar.style.visibility = "hidden";
+        framePlayerBar.style.visibility = "hidden";
+        if (rect && (videoSource === 'camera' || modeSelect.value === 'realtime')) {
+          setupAndStartRealtimeProcessing(width, height, rect);
+        }
+      }
+    };
     function startCamera() {
       errorMsg.textContent = '';
       if (video.srcObject) try { video.srcObject.getTracks().forEach(track => track.stop()); } catch {}
@@ -157,6 +275,43 @@
         errorMsg.textContent = 'カメラ起動エラー: ' + err.message;
       });
     }
+    function startVideoFile(fileURL) {
+      errorMsg.textContent = '';
+      video.srcObject = null;
+      video.src = fileURL;
+      video.currentTime = 0;
+      video.onloadedmetadata = () => {
+        setupCanvasSize(video.videoWidth, video.videoHeight);
+        setTimeout(() => {
+          let duration = video.duration;
+          let step = 1 / 30;
+          let totalFrames = Math.floor(duration / step);
+          let fpsEstimate = totalFrames / duration;
+          if (!isFinite(fpsEstimate) || fpsEstimate < 5) fpsEstimate = 30;
+          lastDetectedFps = fpsEstimate;
+          if (modeSelect.value === "allframe") {
+            fileFpsDisplay.textContent = `この動画の推定fps: ${fpsEstimate.toFixed(2)}`;
+            setupAnalyzeBar();
+          }
+        }, 300);
+        video.currentTime = 0;
+        video.pause();
+        video.onseeked = () => {
+          const ctxVid = canvasVideo.getContext('2d');
+          ctxVid.clearRect(0, 0, width, height);
+          ctxVid.drawImage(video, 0, 0, width, height);
+          startRectSelect(true);
+        };
+        setTimeout(() => {
+          if (video.paused) {
+            const ctxVid = canvasVideo.getContext('2d');
+            ctxVid.clearRect(0, 0, width, height);
+            ctxVid.drawImage(video, 0, 0, width, height);
+            startRectSelect(true);
+          }
+        }, 400);
+      };
+    }
     function setupCanvasSize(w, h) {
       width = w; height = h;
       [canvasVideo, canvasOverlay, canvasRect].forEach(c => {
@@ -165,17 +320,17 @@
       });
       worker.postMessage({ type: "init", width, height });
     }
-    function startRectSelect() {
+    function startRectSelect(waitForPlay = false) {
       rect = null;
-      // カメラの現フレームをcanvasに描画
-      if (!video.paused && video.readyState >= 2) {
+      if (videoSource === 'camera' && !video.paused && video.readyState >= 2) {
         const ctxVid = canvasVideo.getContext('2d');
         ctxVid.clearRect(0, 0, width, height);
         ctxVid.drawImage(video, 0, 0, width, height);
       }
       drawRect();
       selectMsg.textContent = "映像上でドラッグして処理範囲を指定してください";
-      let isSelecting = false, rectStart = null;
+      let isSelecting = false;
+      let rectStart = null;
       function toRealCoords(e) {
         const r = canvasRect.getBoundingClientRect();
         const scaleX = width / r.width;
@@ -204,13 +359,20 @@
         if (rect && rect.w > 10 && rect.h > 10) {
           selectMsg.textContent = `範囲指定: x=${rect.x} y=${rect.y} w=${rect.w} h=${rect.h}（再ドラッグで再選択可）`;
           worker.postMessage({ type: "area", area: rect });
-          setupAndStartRealtimeProcessing(width, height, rect);
+          if ((waitForPlay && videoSource === 'file' && modeSelect.value === 'allframe')) {
+            setupAnalyzeBar();
+          } else {
+            setupAndStartRealtimeProcessing(width, height, rect);
+          }
         } else {
           rect = null;
           drawRect();
           selectMsg.textContent = "範囲が小さすぎます。もう一度ドラッグしてください";
         }
       };
+      canvasRect.ontouchstart = (e) => { e.preventDefault(); canvasRect.onmousedown(e.touches[0]); }
+      canvasRect.ontouchmove = (e) => { e.preventDefault(); canvasRect.onmousemove(e.touches[0]); }
+      canvasRect.ontouchend = (e) => { e.preventDefault(); canvasRect.onmouseup(e.changedTouches[0]); }
     }
     function drawRect() {
       const ctx = canvasRect.getContext('2d');
@@ -223,13 +385,103 @@
         ctx.restore();
       }
     }
+    function setupAnalyzeBar() {
+      if (!video.duration || !rect) return;
+      const fps = lastDetectedFps || 30;
+      const totalFrames = Math.floor(video.duration * fps);
+      analyzeSlider.min = 0;
+      analyzeSlider.max = Math.max(0, totalFrames - Math.floor(3*fps));
+      analyzeSlider.value = 0;
+      analyzeBar.style.visibility = "visible";
+      analyzeInfo.textContent = `0 / ${totalFrames-1}（秒: 0.00）`;
+      analyzeSlider.oninput = () => {
+        const startFrame = Number(analyzeSlider.value);
+        analyzeInfo.textContent = `${startFrame} / ${totalFrames-1}（秒: ${(startFrame/fps).toFixed(2)})`;
+      };
+      analyzeBtn.onclick = async () => {
+        const startFrame = Number(analyzeSlider.value);
+        await processPartialFrames(rect, startFrame, Math.floor(3*fps), fps);
+      };
+    }
+    async function processPartialFrames(area, startFrame, frameCount, fps) {
+      selectMsg.textContent = "指定範囲3秒分差分検出中…";
+      fpsDisplay.textContent = "";
+      progressBar.style.display = "";
+      progressBarInner.style.width = "0%";
+      framePlayerBar.style.visibility = "hidden";
+      canvasOverlay.getContext('2d').clearRect(0, 0, width, height);
+      const overlayDatas = [], baseFrames = [];
+      let ctxVid = canvasVideo.getContext('2d');
+      let prevImageData = ctxVid.createImageData(width, height);
+      worker.postMessage({ type: "area", area });
+      for (let f = 0; f < frameCount; ++f) {
+        await new Promise(resolve => {
+          const t = Math.min((startFrame+f)/fps, video.duration-0.0001);
+          video.currentTime = t;
+          video.onseeked = () => resolve();
+        });
+        ctxVid.drawImage(video, 0, 0, width, height);
+        let currImageData = ctxVid.getImageData(0, 0, width, height);
+        await new Promise(res=>{
+          function onResult(e) {
+            if (e.data.type === "result") {
+              overlayDatas.push({circles: e.data.circles, paths: e.data.paths, img: ctxVid.getImageData(0,0,width,height)});
+              worker.removeEventListener("message", onResult);
+              res();
+            }
+          }
+          worker.addEventListener("message", onResult);
+          worker.postMessage({ type: "frame", data: currImageData.data.buffer }, [currImageData.data.buffer]);
+        });
+        if (f % 3 === 0 || f === frameCount - 1) {
+          progressBarInner.style.width = ((f + 1) / frameCount * 100) + "%";
+        }
+        await new Promise(res => setTimeout(res, 0));
+      }
+      progressBar.style.display = "none";
+      selectMsg.textContent = `3秒分（${frameCount}フレーム）処理完了・再生UIでコントロールできます`;
+      let currIdx = 0, playing = false, timer = null;
+      function showFrame(idx) {
+        idx = Math.max(0, Math.min(overlayDatas.length-1, idx));
+        currIdx = idx;
+        canvasVideo.getContext('2d').putImageData(overlayDatas[idx].img, 0, 0);
+        drawOverlay(overlayDatas[idx].circles, overlayDatas[idx].paths);
+        frameSlider.value = idx;
+        frameInfo.textContent = `${idx+1}/${overlayDatas.length}`;
+        playPauseBtn.textContent = playing ? "⏸️" : "▶️";
+      }
+      framePlayerBar.style.visibility = "visible";
+      frameSlider.min = 0;
+      frameSlider.max = overlayDatas.length-1;
+      frameSlider.value = 0;
+      showFrame(0);
+      playPauseBtn.onclick = ()=>{
+        playing = !playing;
+        playPauseBtn.textContent = playing ? "⏸️" : "▶️";
+        if(playing) loopPlay();
+        else if(timer) clearTimeout(timer);
+      };
+      function loopPlay() {
+        if(!playing) return;
+        showFrame(currIdx+1);
+        if(currIdx+1 < overlayDatas.length) {
+          timer = setTimeout(loopPlay, 1000/fps);
+        } else {
+          playing = false; playPauseBtn.textContent = "▶️";
+        }
+      }
+      prevBtn.onclick = ()=>{ playing=false; showFrame(currIdx-1); };
+      nextBtn.onclick = ()=>{ playing=false; showFrame(Number(currIdx+1)); };
+      frameSlider.oninput = ()=>{ playing=false; showFrame(Number(frameSlider.value)); };
+    }
     function setupAndStartRealtimeProcessing(width, height, area) {
       if (realtimeLoopId) cancelAnimationFrame(realtimeLoopId);
       if (video.paused) video.play();
       let ctxVid = canvasVideo.getContext('2d');
       let lastTime = performance.now(), frames = 0, lastFps = 0;
+      worker.postMessage({ type: "area", area });
       function loop() {
-        if (!rect) return;
+        if (!rect || (videoSource === 'file' && modeSelect.value !== 'realtime')) return;
         if (video.paused) video.play();
         ctxVid.drawImage(video, 0, 0, width, height);
         let currImageData = ctxVid.getImageData(0, 0, width, height);
@@ -253,6 +505,11 @@
       video.srcObject = null; video.removeAttribute('src'); video.pause();
       rect = null; drawRect();
       selectMsg.textContent = '';
+      progressBar.style.display = "none";
+      fileFpsDisplay.textContent = "";
+      lastDetectedFps = null;
+      framePlayerBar.style.visibility = "hidden";
+      analyzeBar.style.visibility = "hidden";
     }
     window.onload = () => { startCamera(); };
   </script>
