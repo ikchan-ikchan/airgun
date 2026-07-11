@@ -1497,24 +1497,35 @@
       const cols=calibCols+1, rows=calibRows+1; // squares = inner corners + 1
       const sq=60;
       const Wp=cols*sq, Hp=rows*sq;
+      // Build tag strings from a helper so no literal complete HTML-doc tags appear
+      // in this file's source (which can confuse HTML parsers / preview renderers).
+      const L="<", G=">";
       let rects="";
       for(let r=0;r<rows;r++){
         for(let c=0;c<cols;c++){
-          if((r+c)%2===0) rects+=`<rect x="${c*sq}" y="${r*sq}" width="${sq}" height="${sq}" fill="black"/>`;
+          if((r+c)%2===0) rects+=`${L}rect x="${c*sq}" y="${r*sq}" width="${sq}" height="${sq}" fill="black"/${G}`;
         }
       }
-      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${Wp}" height="${Hp}" shape-rendering="crispEdges">`+
-                `<rect x="0" y="0" width="${Wp}" height="${Hp}" fill="white"/>${rects}</svg>`;
-      const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Checkerboard ${calibCols}x${calibRows}</title>`+
-                 `<style>html,body{margin:0;height:100%;background:#888;display:flex;flex-direction:column;`+
-                 `justify-content:center;align-items:center;font-family:sans-serif;color:#fff}`+
-                 `.info{position:fixed;top:8px;left:8px;font-size:13px;background:#0008;padding:6px 10px;border-radius:4px}`+
-                 `svg{background:#fff;box-shadow:0 0 20px #0006}</style></head>`+
-                 `<body><div class="info">内側交点 ${calibCols}×${calibRows} / マス ${calibSquare}m を想定<br>`+
-                 `全体が画面に収まるように表示し、平らに保ってください</div>${svg}</body></html>`;
-      const w=window.open("", "_blank");
-      if(w){ w.document.open(); w.document.write(html); w.document.close(); }
-      else { setStatus("ポップアップがブロックされました。許可してください。"); }
+      const svg=`${L}svg xmlns="http://www.w3.org/2000/svg" width="${Wp}" height="${Hp}" shape-rendering="crispEdges"${G}`+
+                `${L}rect x="0" y="0" width="${Wp}" height="${Hp}" fill="white"/${G}${rects}${L}/svg${G}`;
+      const css="html,body{margin:0;height:100%;background:#888;display:flex;flex-direction:column;"+
+                "justify-content:center;align-items:center;font-family:sans-serif;color:#fff}"+
+                ".info{position:fixed;top:8px;left:8px;font-size:13px;background:#0008;padding:6px 10px;border-radius:4px}"+
+                "svg{background:#fff;box-shadow:0 0 20px #0006}";
+      const html=`${L}!DOCTYPE html${G}${L}html${G}${L}head${G}${L}meta charset="utf-8"/${G}`+
+                 `${L}title${G}Checkerboard ${calibCols}x${calibRows}${L}/title${G}`+
+                 `${L}style${G}${css}${L}/style${G}${L}/head${G}`+
+                 `${L}body${G}${L}div class="info"${G}内側交点 ${calibCols}×${calibRows} / マス ${calibSquare}m を想定${L}br/${G}`+
+                 `全体が画面に収まるように表示し、平らに保ってください${L}/div${G}${svg}${L}/body${G}${L}/html${G}`;
+      // Open via Blob URL (more robust than document.write across environments).
+      try{
+        const blob=new Blob([html], {type:"text/html"});
+        const url=URL.createObjectURL(blob);
+        const w=window.open(url, "_blank");
+        if(!w){ setStatus("ポップアップがブロックされました。許可してください。"); }
+      }catch(e){
+        setStatus("チェッカーボード表示に失敗: "+e);
+      }
     }
 
     // Resolve the ArUco API. Depending on the OpenCV.js build, ArUco lives either
