@@ -42,7 +42,7 @@
       <b>★ 新バージョン v2（OpenCV 4.10 / MediaPipe削除済み・クリーン版）★</b><br>
       この表示が出ていれば最新版が反映されています。<br>
       ・人体骨格(MediaPipe)は削除。ArUco枠+画面狙いに集中<br>
-      ・OpenCV.js は techstark 4.10.0（ArUco込み）<br>
+      ・OpenCV.js は公式 docs.opencv.org 4.11.0（ArUco込み・script tag対応版）<br>
     </div>
 
     <div class="box">
@@ -260,19 +260,19 @@
   <!--
     ========================= 配布について（GitHub Pages / https）=========================
     このHTMLは https 配信（GitHub Pages 等）で開く前提です。
-    https で開けば file:// のCORS/WASM制約が無いため、OpenCV.js をフルに使えます。
+    https で開けば file:// のCORS制約が無いため、公式 OpenCV.js をそのまま使えます。
 
-    ★ GitHub Pages での公開手順:
-      1) このHTMLを Pages 有効のリポジトリにアップロード（例: aruco.html）
-      2) コミット
-      3) https://<ユーザー名>.github.io/<リポジトリ名>/aruco.html で開く
-      → 初回アクセスで opencv.js がキャッシュされ、以降はオフラインでも動作
+    ★ 重要な変更: OpenCV.js を「公式 docs.opencv.org の 4.11.0」に変更しました。
+      理由: techstark版(jsDelivr/npm)はwebpackでバンドルする前提のモジュールで、
+      素の <script src> 読み込みではグローバル cv が作られず「初期化中で停止」しました。
+      公式ビルドは <script> タグで読むとグローバル cv を作る標準的なビルドで、ArUco込みです。
 
-    使用ライブラリ: OpenCV.js（techstark 4.10.0, jsDelivr）— ArUcoモジュール込み。
+    使用ライブラリ: OpenCV.js 4.11.0 (公式 docs.opencv.org, ArUco/objdetect込み)。
     注: MediaPipe(人体骨格)は削除済み。ArUco枠+姿勢推定(画面狙い)に集中。
+    注: 4.11.0 は cv が Promise になる場合があるため、boot() で await 相当の処理をしています。
   -->
-  <!-- OpenCV.js 4.10.0 (techstark, ArUco込み) -->
-  <script src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js"
+  <!-- OpenCV.js 4.11.0 (公式・standalone・ArUco込み・script tagでグローバルcvを生成) -->
+  <script async src="https://docs.opencv.org/4.11.0/opencv.js"
           onload="window.__cvScriptLoaded=true;"
           onerror="window.__cvScriptError=true;"></script>
 
@@ -487,7 +487,7 @@
     function setStatus(msg){ if(statusDiv) statusDiv.textContent = msg; }
     function logDebug(msg){ console.log(msg); if(debugDiv) debugDiv.textContent = msg; }
 
-    function hook(el,fn){ el.addEventListener("change",fn); el.addEventListener("input",fn); }
+    function hook(el,fn){ if(!el) return; el.addEventListener("change",fn); el.addEventListener("input",fn); }
 
     function setIfExists(obj,key,value,applied){
       if (obj && (key in obj)) { try{ obj[key]=value; applied.push(`${key}=${value}`);}catch(e){applied.push(`${key}(fail)`);} return true; }
@@ -590,6 +590,31 @@
       video=document.getElementById("video");
       canvas=document.getElementById("canvas");
       canvas3d=document.getElementById("canvas3d");
+
+      // ---- Wire the camera button FIRST, before any other init that could throw.
+      // This guarantees the "カメラ開始" button always responds even if some later
+      // setup step fails. getUserMedia here is what triggers the permission dialog.
+      (function wireStartButtonEarly(){
+        const startBtn = document.getElementById("startBtn");
+        if(!startBtn) return;
+        let cameraStarting = false;
+        startBtn.addEventListener("click", ()=>{
+          if(cameraReady || cameraStarting) return;
+          cameraStarting = true;
+          startBtn.disabled = true;
+          startBtn.textContent = "カメラ起動中…";
+          setStatus("カメラ開始…（許可ダイアログが出たら「許可」）");
+          startCamera().then(()=>{
+            if(startBtn.parentElement) startBtn.parentElement.style.display="none";
+          }).catch(err=>{
+            console.error(err);
+            cameraStarting = false;
+            startBtn.disabled = false;
+            startBtn.textContent = "▶ カメラ開始（再試行）";
+            setStatus("カメラ取得失敗: " + (err && err.name ? err.name : err));
+          });
+        });
+      })();
 
       ctx=canvas.getContext("2d", {willReadFrequently:true});
       ctx3d=canvas3d.getContext("2d");
@@ -851,29 +876,6 @@
 
       markerLength = parseFloat(markerLengthInput.value);
       wallHalf = parseFloat(wallSizeInput.value)/2.0;
-
-      // Camera is started by user gesture (button). Auto getUserMedia is blocked
-      // on many mobile browsers, which was preventing the camera from starting.
-      const startBtn = document.getElementById("startBtn");
-      let cameraStarting = false;
-      if(startBtn){
-        startBtn.addEventListener("click", ()=>{
-          if(cameraReady || cameraStarting) return;
-          cameraStarting = true;
-          startBtn.disabled = true;
-          startBtn.textContent = "カメラ起動中…";
-          setStatus("カメラ開始…（許可ダイアログが出たら「許可」）");
-          startCamera().then(()=>{
-            if(startBtn.parentElement) startBtn.parentElement.style.display="none";
-          }).catch(err=>{
-            console.error(err);
-            cameraStarting = false;
-            startBtn.disabled = false;
-            startBtn.textContent = "▶ カメラ開始（再試行）";
-            setStatus("カメラ取得失敗: " + (err && err.name ? err.name : err));
-          });
-        });
-      }
 
       setStatus("ライブラリ読込中…（「カメラ開始」は読込後に有効）");
     }
@@ -2226,14 +2228,20 @@
     // even if a CDN is slow or fails.
     function main(){
       try{
-        initApp();     // UI binding + button wiring (runs immediately)
+        initApp();     // UI binding + button wiring
       }catch(e){
-        console.error(e);
+        console.error("initApp error:", e);
         const sd=document.getElementById("status");
-        if(sd) sd.textContent="初期化エラー: "+e;
-        return;
+        if(sd) sd.textContent="初期化で一部エラー: "+(e&&e.message?e.message:e)+"（続行します）";
+        // IMPORTANT: do NOT return. boot() must still run so OpenCV initializes.
       }
-      boot();          // dynamic library load (async)
+      try{
+        boot();        // load/await OpenCV.js
+      }catch(e){
+        console.error("boot error:", e);
+        const sd=document.getElementById("status");
+        if(sd) sd.textContent="OpenCV起動エラー: "+(e&&e.message?e.message:e);
+      }
     }
 
     if(document.readyState==="loading"){
