@@ -39,10 +39,11 @@
     </div>
 
     <div id="help" class="box">
-      <b>★ 新バージョン v2（OpenCV 4.10 / MediaPipe削除済み・クリーン版）★</b><br>
+      <b>★ 新バージョン v3（OpenCV 自動フォールバック / MediaPipe削除済み）★</b><br>
       この表示が出ていれば最新版が反映されています。<br>
+      ・OpenCV.js を複数候補から自動で読み込み（1つ失敗したら次を試行）<br>
+      ・どれか成功すれば「採用: ○○」とデバッグ欄に表示されます<br>
       ・人体骨格(MediaPipe)は削除。ArUco枠+画面狙いに集中<br>
-      ・OpenCV.js は公式 docs.opencv.org 4.11.0（ArUco込み・script tag対応版）<br>
     </div>
 
     <div class="box">
@@ -258,23 +259,14 @@
   </div>
 
   <!--
-    ========================= 配布について（GitHub Pages / https）=========================
-    このHTMLは https 配信（GitHub Pages 等）で開く前提です。
-    https で開けば file:// のCORS制約が無いため、公式 OpenCV.js をそのまま使えます。
+    ========================= OpenCV.js 自動フォールバック読み込み =========================
+    複数の opencv.js 候補URLを順番に試し、cv.Mat が使える状態になったものを採用します。
+    どのCDN/バージョンが動くか事前に分からなくても、ブラウザが自動で動くものを見つけます。
 
-    ★ 重要な変更: OpenCV.js を「公式 docs.opencv.org の 4.11.0」に変更しました。
-      理由: techstark版(jsDelivr/npm)はwebpackでバンドルする前提のモジュールで、
-      素の <script src> 読み込みではグローバル cv が作られず「初期化中で停止」しました。
-      公式ビルドは <script> タグで読むとグローバル cv を作る標準的なビルドで、ArUco込みです。
-
-    使用ライブラリ: OpenCV.js 4.11.0 (公式 docs.opencv.org, ArUco/objdetect込み)。
+    ・https配信(GitHub Pages等)推奨。file:// では docs.opencv.org がCORSで弾かれます。
+    ・候補リストは boot() 内の CV_SOURCES で定義。上から順に試行。
     注: MediaPipe(人体骨格)は削除済み。ArUco枠+姿勢推定(画面狙い)に集中。
-    注: 4.11.0 は cv が Promise になる場合があるため、boot() で await 相当の処理をしています。
   -->
-  <!-- OpenCV.js 4.11.0 (公式・standalone・ArUco込み・script tagでグローバルcvを生成) -->
-  <script async src="https://docs.opencv.org/4.11.0/opencv.js"
-          onload="window.__cvScriptLoaded=true;"
-          onerror="window.__cvScriptError=true;"></script>
 
   <script>
     // ========= State =========
@@ -891,75 +883,131 @@
       });
     }
 
-    function boot(){
-      setStatus("OpenCV.js 初期化中…");
+    // ========= OpenCV.js 自動フォールバック読み込み =========
+    // 候補URLを上から順に試し、cv.Mat が使えるようになったものを採用する。
+    // 各候補は「script読込 → 最大N秒 cv.Mat 出現待ち」。ダメなら次の候補へ。
+    const CV_SOURCES = [
+      { name:"jsDelivr techstark 4.10.0", url:"https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js" },
+      { name:"公式 docs 4.11.0",          url:"https://docs.opencv.org/4.11.0/opencv.js" },
+      { name:"公式 docs 4.10.0",          url:"https://docs.opencv.org/4.10.0/opencv.js" },
+      { name:"公式 docs 4.8.0",           url:"https://docs.opencv.org/4.8.0/opencv.js" },
+      { name:"公式 docs 4.5.5",           url:"https://docs.opencv.org/4.5.5/opencv.js" },
+      { name:"unpkg techstark 4.10.0",    url:"https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js" },
+      { name:"jsDelivr techstark 4.9.0",  url:"https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.3/dist/opencv.js" },
+    ];
 
-      let cvReadyHandled=false;
-      function finishCvReady(){
-        if(cvReadyHandled) return;
-        if(!(window.cv && typeof window.cv.Mat === "function")) return;
-        cvReadyHandled=true;
-        CV = window.cv;
-        cvReady = true;
-        afterCvReady();
-      }
+    // ローカル同梱 opencv.js があれば最優先（完全オフライン用）。
+    // HTMLと同じフォルダに opencv.js を置くと、これが最初に試される。
+    CV_SOURCES.unshift({ name:"ローカル同梱 opencv.js", url:"opencv.js", localOptional:true });
 
-      // techstark 4.10.0: `cv` is often a Promise that resolves to the module.
-      // Resolve it (safely, even for non-standard thenables), then wait for cv.Mat.
-      function tryResolvePromise(){
-        if(window.cv && typeof window.cv.then === "function" && typeof window.cv.Mat !== "function"){
-          Promise.resolve(window.cv).then(m=>{
-            if(m && typeof m.Mat === "function"){ window.cv = m; finishCvReady(); }
-          }, ()=>{});
-        }
-      }
+    let cvBootHandled = false;
 
-      // If already the ready module, done.
-      if(window.cv && typeof window.cv.Mat === "function"){ finishCvReady(); return; }
-      // If it's a Promise, kick off resolution.
-      tryResolvePromise();
-      // If it's a (non-Promise) module object not yet initialized, hook the callback.
-      if(window.cv && typeof window.cv === "object" && typeof window.cv.then !== "function"){
-        try{ window.cv.onRuntimeInitialized = ()=>{ finishCvReady(); }; }catch(e){}
-      }
+    function finishCvReady(){
+      if(cvBootHandled) return;
+      if(!(window.cv && typeof window.cv.Mat === "function")) return;
+      cvBootHandled = true;
+      CV = window.cv;
+      cvReady = true;
+      afterCvReady();
+    }
 
-      // Light 500ms poll fallback (no tight loop -> no freeze).
-      let waited=0;
-      const iv=setInterval(()=>{
-        waited+=500;
-        if(window.cv && typeof window.cv.Mat === "function"){
-          clearInterval(iv); finishCvReady(); return;
-        }
-        tryResolvePromise();
-        if(window.cv && typeof window.cv === "object" && typeof window.cv.then !== "function"
-           && !window.cv.__hooked && typeof window.cv.Mat !== "function"){
-          window.cv.__hooked = true;
-          try{ window.cv.onRuntimeInitialized = ()=>{ finishCvReady(); }; }catch(e){}
-        }
-        const t = typeof window.cv;
-        const hasMat = (window.cv && window.cv.Mat) ? "Mat=OK" : "Mat無";
-        const hasThen = (window.cv && window.cv.then) ? "then有(Promise)" : "then無";
-        setStatus(`OpenCV初期化待ち ${waited/1000}s | cv=${t} | ${hasMat} | ${hasThen}`);
-        if(debugDiv) debugDiv.textContent =
-          `OpenCV初期化待ち…\ntypeof window.cv = ${t}\n`+
-          `window.cv.Mat = ${window.cv?(typeof window.cv.Mat):"(cv無)"}\n`+
-          `window.cv.then = ${window.cv?(typeof window.cv.then):"(cv無)"}\n`+
-          `script onload = ${!!window.__cvScriptLoaded}\n`+
-          `script onerror = ${!!window.__cvScriptError}\n経過 ${waited/1000}s`;
+    // 1つの候補URLを試す。cv.Mat が使えるようになったら resolve(true)、失敗で resolve(false)。
+    function tryOneSource(src, perSourceTimeoutMs){
+      return new Promise((resolve)=>{
+        let settled = false;
+        const done = (ok)=>{ if(settled) return; settled = true; resolve(ok); };
 
-        if(window.__cvScriptError && !window.cv){
-          clearInterval(iv);
-          setStatus("opencv.js を読み込めませんでした。ネット接続を確認してください（https配信推奨）。");
+        // techstark等でグローバル Module 衝突を避けるため、毎回リセットはしない。
+        // 事前に cv をクリア（前の候補の残骸を排除）。
+        try{ if(!(window.cv && typeof window.cv.Mat === "function")) { window.cv = undefined; } }catch(e){}
+
+        const s = document.createElement("script");
+        s.src = src.url;
+        s.async = true;
+
+        let scriptFailed = false;
+        s.onerror = ()=>{ scriptFailed = true; /* ポーリング側でタイムアウト処理 */ };
+        s.onload  = ()=>{ /* onloadしても cv 準備は非同期なのでポーリングで確認 */ };
+
+        // cv を待つポーリング（Promise/コールバック両対応）
+        let waited = 0;
+        const step = 250;
+        const iv = setInterval(()=>{
+          waited += step;
+
+          // 準備完了？
+          if(window.cv && typeof window.cv.Mat === "function"){
+            clearInterval(iv); done(true); return;
+          }
+          // cv が Promise（thenable）なら解決を試みる
+          if(window.cv && typeof window.cv.then === "function" && typeof window.cv.Mat !== "function"){
+            Promise.resolve(window.cv).then(m=>{
+              if(m && typeof m.Mat === "function"){ window.cv = m; }
+            }, ()=>{});
+          }
+          // cv がモジュールオブジェクトで未初期化ならコールバックを仕込む
+          if(window.cv && typeof window.cv === "object" && typeof window.cv.then !== "function"
+             && !window.cv.__hooked && typeof window.cv.Mat !== "function"){
+            window.cv.__hooked = true;
+            try{ window.cv.onRuntimeInitialized = ()=>{ /* 次のtickで検出 */ }; }catch(e){}
+          }
+
+          // 進捗表示
+          const t = typeof window.cv;
+          const hasMat = (window.cv && window.cv.Mat) ? "Mat=OK" : "Mat無";
           if(debugDiv) debugDiv.textContent =
-            "opencv.js の読み込みに失敗しました。\n"+
-            "・GitHub Pages 等の https で開いてください（file:// はCORSで失敗します）。\n"+
-            "・初回はインターネット接続が必要です。";
+            `OpenCV 読み込み試行中…\n`+
+            `候補: ${src.name}\n`+
+            `URL: ${src.url}\n`+
+            `typeof cv = ${t} / ${hasMat}\n`+
+            `script onerror = ${scriptFailed}\n`+
+            `この候補の経過: ${(waited/1000).toFixed(1)}s / 上限 ${(perSourceTimeoutMs/1000)}s`;
+
+          // scriptロード失敗が確定し、まだ cv も無ければ早めに打ち切り
+          if(scriptFailed && !(window.cv)){
+            clearInterval(iv); done(false); return;
+          }
+          // この候補のタイムアウト
+          if(waited >= perSourceTimeoutMs){
+            clearInterval(iv); done(false); return;
+          }
+        }, step);
+      });
+    }
+
+    async function boot(){
+      setStatus("OpenCV.js 読み込み中…（複数候補を自動試行）");
+
+      // 既に読み込み済みなら即完了
+      if(window.cv && typeof window.cv.Mat === "function"){ finishCvReady(); return; }
+
+      const tried = [];
+      for(let i=0;i<CV_SOURCES.length;i++){
+        const src = CV_SOURCES[i];
+        // ローカル同梱は「存在すれば」使う。無ければ即失敗して次へ（短めタイムアウト）。
+        const timeout = src.localOptional ? 4000 : 20000;
+
+        setStatus(`OpenCV 試行 ${i+1}/${CV_SOURCES.length}: ${src.name}`);
+        const ok = await tryOneSource(src, timeout);
+        tried.push(`${ok?"○":"×"} ${src.name}`);
+
+        if(ok && window.cv && typeof window.cv.Mat === "function"){
+          setStatus(`OpenCV 準備OK（採用: ${src.name}）`);
+          if(debugDiv) debugDiv.textContent =
+            `OpenCV 読み込み成功！\n採用: ${src.name}\nURL: ${src.url}\n\n試行結果:\n`+tried.join("\n");
+          finishCvReady();
+          return;
         }
-        if(waited>=40000){
-          clearInterval(iv);
-          if(!cvReadyHandled) setStatus("OpenCV初期化がタイムアウトしました。ページを再読み込みしてください。");
-        }
-      }, 500);
+      }
+
+      // 全候補失敗
+      setStatus("OpenCV.js を読み込めませんでした（全候補失敗）。");
+      if(debugDiv) debugDiv.textContent =
+        "OpenCV.js の読み込みに全候補で失敗しました。\n\n試行結果:\n"+tried.join("\n")+
+        "\n\n対処:\n"+
+        "・インターネット接続を確認してください（初回はネット必須）。\n"+
+        "・file:// で開いている場合、docs.opencv.org はCORSで弾かれます → GitHub Pages 等の https で開いてください。\n"+
+        "・完全オフラインにしたい場合は、opencv.js をHTMLと同じフォルダに置いてください（自動で最優先採用します）。";
     }
 
     function afterCvReady(){
