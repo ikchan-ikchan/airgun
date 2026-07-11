@@ -2,2310 +2,780 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <!--
-    外部スクリプト(opencv.js)の読み込みを許可するCSP。
-    GitHub Pages が default-src 'none' 等の制限的CSPを付ける場合があり、
-    それだと外部CDNのopencv.jsが読めずブロックされる。ここで明示的に許可する。
-    ただし meta の CSP は HTTPヘッダのCSPを「緩める」ことはできない仕様のため、
-    根本的にはリポジトリ側の設定変更が必要な場合がある（下の説明参照）。
-  -->
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src *; img-src * data: blob:; style-src * 'unsafe-inline'; worker-src * blob:;">
-  <title>AirGun ArUco v2 (OpenCV 4.10 / clean) - 2025</title>
+  <title>ArUco マーカー検出 + 3Dビュー (壁サイズ/平滑度調整付き)</title>
   <style>
-    body { margin:0; display:flex; flex-direction:row; height:100vh; background:#222; color:#eee; font-family:sans-serif; }
-    #left { flex:2; display:flex; flex-direction:row; background:#111; }
-    #camContainer, #view3dContainer { flex:1; position:relative; display:flex; justify-content:center; align-items:center; overflow:hidden; border-right:1px solid #333; }
-    #view3dContainer { border-right:none; border-left:1px solid #333; }
-    #right { flex:1; padding:8px; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; background:#181818; border-left:1px solid #444; font-size:13px; overflow:auto; }
-    #video { display:none; }
-    #canvas, #canvas3d { max-width:100%; max-height:100%; background:#000; }
-    #status { font-weight:bold; color:#0f0; white-space:pre-line; }
-    #debug { white-space:pre-line; background:#000; padding:6px; border-radius:4px; border:1px solid #444; font-family:monospace; font-size:12px; max-height:55vh; overflow:auto; }
-    #help { font-size:12px; line-height:1.4; }
-    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    .box { background:#101010; border:1px solid #333; border-radius:6px; padding:8px; }
-    label { user-select:none; }
-    input[type="number"], textarea, select { background:#000; color:#eee; border:1px solid #555; padding:3px 6px; border-radius:4px; font-size:12px; }
-    textarea { width:100%; min-height:70px; resize:vertical; }
-    .small { font-size:12px; color:#bbb; }
-    .warn { color:#ffcc66; }
+    body {
+      margin: 0;
+      display: flex;
+      flex-direction: row;
+      height: 100vh;
+      background: #222;
+      color: #eee;
+      font-family: sans-serif;
+    }
+    /* 左：カメラ映像 + 3Dビューの二分割エリア */
+    #left {
+      flex: 2;
+      display: flex;
+      flex-direction: row;
+      background: #111;
+    }
+    #camContainer, #view3dContainer {
+      flex: 1;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      border-right: 1px solid #333;
+    }
+    #view3dContainer {
+      border-right: none;
+      border-left: 1px solid #333;
+    }
+    #right {
+      flex: 1;
+      padding: 8px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #181818;
+      border-left: 1px solid #444;
+      font-size: 13px;
+      overflow: auto;
+    }
+    #video {
+      display: none;
+    }
+    #canvas, #canvas3d {
+      max-width: 100%;
+      max-height: 100%;
+      background: #000;
+    }
+    #status {
+      font-weight: bold;
+      color: #0f0;
+      white-space: pre-line;
+    }
+    #debug {
+      white-space: pre-line;
+      background: #000;
+      padding: 6px;
+      border-radius: 4px;
+      border: 1px solid #444;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 50vh;
+      overflow: auto;
+    }
+    #help {
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    #markerLengthInput,
+    #wallSizeInput {
+      width: 80px;
+      background: #000;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    #smoothInput {
+      width: 140px;
+    }
   </style>
 </head>
 <body>
   <div id="left">
+    <!-- 非表示のビデオ（ソース） -->
     <video id="video" playsinline></video>
-    <div id="camContainer"><canvas id="canvas"></canvas></div>
-    <div id="view3dContainer"><canvas id="canvas3d"></canvas></div>
+
+    <!-- 左：カメラ映像 -->
+    <div id="camContainer">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <!-- 右：3Dビュー（カメラ固定・マーカーが動く + 壁） -->
+    <div id="view3dContainer">
+      <canvas id="canvas3d"></canvas>
+    </div>
   </div>
 
+  <!-- 右：ステータス / ヘルプ / デバッグ -->
   <div id="right">
-    <div id="status">読み込み待ち…</div>
+    <div id="status">OpenCV.js 読み込み待ち…</div>
 
-    <div class="box" style="text-align:center;">
-      <button id="startBtn" style="background:#164;color:#fff;border:1px solid #588;border-radius:6px;padding:10px 24px;font-size:15px;font-weight:bold;cursor:pointer;">▶ カメラ開始</button>
-      <div class="small" style="margin-top:6px;">スマホ/一部ブラウザはボタン操作からでないとカメラが起動しません</div>
+    <div id="help">
+      <b>使い方:</b><br>
+      1. ページを開くとカメラ権限を聞かれます → 許可<br>
+      2. A4 に印刷した ArUco マーカー (DICT_4X4_50) をカメラに映す<br>
+      3. 左の映像に赤枠 + ID, 緑の矢印(マーカーの向き)が出れば 2D 検出成功<br>
+      4. 右の 3D ビューでは、<b>カメラは原点</b>に固定され、<b>マーカーとその法線</b>、<br>
+         そして <b>カメラ位置の壁(z=0平面)</b>と、法線がその壁に当たる位置が見えます。<br>
+      <br>
+      <b>カメラ距離の表示:</b><br>
+      下でマーカー一辺の長さ[m]を設定すると、その物理長さとして<br>
+      solvePnP し、カメラからの距離[m]を計算して表示します。<br>
     </div>
 
-    <div id="help" class="box">
-      <b>★ 新バージョン v3（OpenCV 自動フォールバック / MediaPipe削除済み）★</b><br>
-      この表示が出ていれば最新版が反映されています。<br>
-      ・OpenCV.js を複数候補から自動で読み込み（1つ失敗したら次を試行）<br>
-      ・どれか成功すれば「採用: ○○」とデバッグ欄に表示されます<br>
-      ・人体骨格(MediaPipe)は削除。ArUco枠+画面狙いに集中<br>
+    <div>
+      <b>マーカー一辺の長さ [m]:</b>
+      <input id="markerLengthInput" type="number" value="0.10" step="0.01" min="0.01">
     </div>
 
-    <div class="box">
-      <b>方式切替</b>
-      <div class="row" style="margin-top:6px;">
-        <label>辞書:
-          <select id="dictSel">
-            <option value="4X4_50">DICT_4X4_50</option>
-            <option value="4X4_100">DICT_4X4_100</option>
-            <option value="4X4_250">DICT_4X4_250</option>
-            <option value="5X5_50">DICT_5X5_50</option>
-            <option value="5X5_250">DICT_5X5_250</option>
-            <option value="6X6_50">DICT_6X6_50</option>
-            <option value="6X6_250">DICT_6X6_250</option>
-            <option value="7X7_50">DICT_7X7_50</option>
-            <option value="ARUCO_ORIGINAL">ARUCO_ORIGINAL</option>
-            <option value="APRILTAG_36h11">APRILTAG_36h11</option>
-          </select>
-        </label>
-      </div>
-      <div class="row" style="margin-top:6px;">
-        <label>組み合わせ:
-          <select id="comboSel">
-            <option value="S_IPPE">SUBPIX(1) + IPPE_SQUARE</option>
-            <option value="S_ITER">SUBPIX(1) + ITERATIVE</option>
-            <option value="A_IPPE">APRILTAG(3) + IPPE_SQUARE</option>
-            <option value="A_ITER">APRILTAG(3) + ITERATIVE</option>
-          </select>
-        </label>
-        <span class="small">FPS: <span id="fpsSpan">--</span></span>
-      </div>
-      <div class="small warn" id="dictNote"></div>
+    <div>
+      <b>壁サイズ [m]（一辺）:</b>
+      <input id="wallSizeInput" type="number" value="1.0" step="0.1" min="0.1" max="5.0">
     </div>
 
-    <div class="box">
-      <b>基本パラメータ</b>
-      <div class="row" style="margin-top:6px;">
-        <label>マーカー一辺[m]:
-          <input id="markerLengthInput" type="number" value="0.04" step="0.005" min="0.005">
-        </label>
-        <label>壁サイズ[m]:
-          <input id="wallSizeInput" type="number" value="1.0" step="0.1" min="0.1" max="10.0">
-        </label>
-      </div>
+    <div>
+      <b>平滑度 (0=なし, 100=最大):</b><br>
+      <input id="smoothInput" type="range" min="0" max="100" value="50">
+      <span id="smoothLabel">50</span>
     </div>
 
-    <div class="box">
-      <b>立方体モード（隣接2面）</b>
-      <div class="row" style="margin-top:6px;">
-        <label><input id="cubeModeChk" type="checkbox"> 2面同時PnPで姿勢推定（45°射出）</label>
-      </div>
-      <div class="row">
-        <label>+X面ID:
-          <input id="cubeIdAInput" type="number" value="1" step="1" min="0" style="width:70px;">
-        </label>
-        <label>+Y面ID:
-          <input id="cubeIdBInput" type="number" value="2" step="1" min="0" style="width:70px;">
-        </label>
-        <label>立方体一辺[m]:
-          <input id="cubeSizeInput" type="number" value="0.04" step="0.005" min="0.005" style="width:90px;">
-        </label>
-      </div>
-      <div class="small">
-        マーカーAは+X面、Bは+Y面に配置。両者の「上」=立方体+Z。<br>
-        射出方向: (1,1,0)/√2（両面法線の二等分） / 原点: 共有エッジ中央
-      </div>
-    </div>
-
-    <div class="box">
-      <b>画面狙い (Aim at Screen)</b>
-      <div class="row" style="margin-top:6px;">
-        <label><input id="screenModeChk" type="checkbox" checked> ON（Z=0を画面平面とする）</label>
-        <button id="fullscreenBtn" style="background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer;">全画面ターゲット</button>
-      </div>
-      <div class="row">
-        <label>画面幅W[m]:
-          <input id="screenWInput" type="number" value="0.34" step="0.01" min="0.05" style="width:80px;">
-        </label>
-        <label>画面高H[m]:
-          <input id="screenHInput" type="number" value="0.21" step="0.01" min="0.05" style="width:80px;">
-        </label>
-        <label>カメラY位置[m]:
-          <input id="camYOffsetInput" type="number" value="0.0" step="0.005" style="width:80px;">
-        </label>
-      </div>
-      <div class="small">
-        カメラYは「カメラから画面上端までの距離」。カメラが画面の真上にあるなら 0、画面に埋まっているなら負、画面より上にあるなら正。<br>
-        前提: カメラは画面の横中央上端付近にあり、画面に正対している。
-      </div>
-      <canvas id="screenCanvas" width="340" height="220" style="background:#000;border:1px solid #444;border-radius:4px;margin-top:6px;display:block;"></canvas>
-      <div class="small" id="screenReadout">aim: -</div>
-    </div>
-
-    <div class="box">
-      <b>平滑化 (ジッタ低減)</b>
-      <div class="row" style="margin-top:6px;">
-        <label><input id="smoothOnChk" type="checkbox" checked> ON（One Euro Filter）</label>
-      </div>
-      <div class="row">
-        <label>追従性 minCutoff:
-          <input id="smoothMinCutoffInput" type="number" value="1.5" step="0.1" min="0.1" style="width:80px;">
-        </label>
-        <label>速度感度 beta:
-          <input id="smoothBetaInput" type="number" value="0.5" step="0.05" min="0" style="width:80px;">
-        </label>
-      </div>
-      <div class="small">
-        minCutoff↓ = 静止時なめらか（遅延↑） / beta↑ = 速い動きに素早く追従。<br>
-        まず minCutoff を下げて「かくかく」を消し、狙いが遅れるなら beta を上げる。
-      </div>
-    </div>
-
-    <div class="box">
-      <b>カメラ校正 (チェッカーボード・自動)</b>
-      <div class="row" style="margin-top:6px;">
-        <label>内側交点 横:
-          <input id="calibColsInput" type="number" value="9" step="1" min="3" style="width:60px;">
-        </label>
-        <label>縦:
-          <input id="calibRowsInput" type="number" value="6" step="1" min="3" style="width:60px;">
-        </label>
-        <label>マス[m]:
-          <input id="calibSquareInput" type="number" value="0.025" step="0.001" min="0.005" style="width:80px;">
-        </label>
-      </div>
-      <div class="row" style="margin-top:6px;">
-        <button id="calibStartBtn"   style="background:#153;color:#eee;border:1px solid #575;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">校正開始</button>
-        <button id="calibStopBtn"    style="background:#511;color:#eee;border:1px solid #755;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">停止</button>
-        <button id="calibBoardBtn"   style="background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">ボード表示</button>
-      </div>
-      <div class="row" style="margin-top:6px;">
-        <button id="calibCaptureBtn" style="background:#225;color:#eee;border:1px solid #558;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">キャプチャ</button>
-        <label><input id="calibAutoChk" type="checkbox"> 自動キャプチャ</label>
-        <button id="calibComputeBtn" style="background:#252;color:#eee;border:1px solid #585;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">計算実行</button>
-        <button id="calibResetBtn"   style="background:#333;color:#eee;border:1px solid #666;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">リセット</button>
-      </div>
-      <div class="small warn" id="calibStatus">未校正</div>
-      <div class="small">
-        手順: ①「ボード表示」で別の画面/印刷にチェッカーボードを出す ②「校正開始」③盤面を色々な角度・位置で映して10〜20枚キャプチャ（自動推奨） ④「計算実行」。<br>
-        完了すると自動でキャリブレーション値が入り「使用」がONになります。RMSは0.3px以下が目安。
-      </div>
-    </div>
-
-    <div class="box">
-      <b>実験トグル</b>
-
-      <div class="row" style="margin-top:6px;">
-        <label><input id="useWallMarkerChk" type="checkbox"> 壁平面を「壁マーカー」から推定</label>
-      </div>
-      <div class="row">
-        <label>壁ID:
-          <input id="wallIdInput" type="number" value="0" step="1" min="0" style="width:70px;">
-        </label>
-        <label>レーザーID:
-          <input id="laserIdInput" type="number" value="1" step="1" min="0" style="width:70px;">
-        </label>
-        <label><input id="holdWallPoseChk" type="checkbox" checked> 壁姿勢を保持</label>
-        <label><input id="onlyForwardChk" type="checkbox" checked> 前方向のみ</label>
-      </div>
-
-      <hr style="border:0;border-top:1px solid #333;margin:8px 0;">
-
-      <div class="row">
-        <label><input id="useCalibChk" type="checkbox"> キャリブレーション値を使用</label>
-        <label>FOV仮定[deg]:
-          <input id="fovInput" type="number" value="70" step="1" min="30" max="120" style="width:70px;">
-        </label>
-      </div>
-      <div class="small">
-        例: {"K":[[fx,0,cx],[0,fy,cy],[0,0,1]],"D":[k1,k2,p1,p2,k3]}
-      </div>
-      <textarea id="calibText"></textarea>
-
-      <hr style="border:0;border-top:1px solid #333;margin:8px 0;">
-
-      <div class="row">
-        <label><input id="refineLMChk" type="checkbox"> RefineLM(あれば)</label>
-      </div>
-
-      <hr style="border:0;border-top:1px solid #333;margin:8px 0;">
-
-      <div class="row">
-        <label><input id="reprojGateChk" type="checkbox"> 再投影誤差ゲート</label>
-        <label>閾値[px]:
-          <input id="reprojThreshInput" type="number" value="3.0" step="0.1" min="0.1" style="width:80px;">
-        </label>
-        <label>動作:
-          <select id="reprojActionSel">
-            <option value="reject" selected>捨てる</option>
-            <option value="hold">前回保持</option>
-            <option value="accept">そのまま</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="small warn" id="lmNote"></div>
-    </div>
-
-    <div style="display:flex; align-items:center; gap:8px;">
-      <b>デバッグログ:</b>
-      <button id="copyDebugBtn" style="background:#222; color:#eee; border:1px solid #555; border-radius:4px; padding:3px 10px; font-size:12px; cursor:pointer;">コピー</button>
-      <span id="copyDebugMsg" class="small"></span>
-    </div>
+    <div><b>デバッグログ:</b></div>
     <div id="debug"></div>
   </div>
 
-  <!-- Fullscreen target overlay -->
-  <div id="fsTarget" style="display:none; position:fixed; inset:0; background:#000; z-index:9999; cursor:none;">
-    <canvas id="fsCanvas" style="width:100%; height:100%; display:block;"></canvas>
-    <div style="position:absolute; top:10px; left:10px; color:#888; font-family:monospace; font-size:14px; pointer-events:none;">
-      ESCで終了 / クリックでショット記録
-    </div>
-  </div>
-
-  <!--
-    ========================= OpenCV.js 自動フォールバック読み込み =========================
-    複数の opencv.js 候補URLを順番に試し、cv.Mat が使える状態になったものを採用します。
-    どのCDN/バージョンが動くか事前に分からなくても、ブラウザが自動で動くものを見つけます。
-
-    ・https配信(GitHub Pages等)推奨。file:// では docs.opencv.org がCORSで弾かれます。
-    ・候補リストは boot() 内の CV_SOURCES で定義。上から順に試行。
-    注: MediaPipe(人体骨格)は削除済み。ArUco枠+姿勢推定(画面狙い)に集中。
-  -->
+  <!-- OpenCV.js 本体（4.11.0, Promise 版） -->
+  <script async src="https://docs.opencv.org/4.11.0/opencv.js" onload="onOpenCvLoaded();"></script>
 
   <script>
-    // ========= State =========
+    // OpenCV.js の Promise の中身
     let CV = null;
-    let cvReady = false;
-    let cameraReady = false;
-    let processingStarted = false;
 
-    let video=null, canvas=null, ctx=null;
-    let canvas3d=null, ctx3d=null;
-    let debugDiv=null, statusDiv=null;
-
-    // UI
-    let comboSel, fpsSpan;
-    let dictSel=null, dictNoteEl=null;
-    let markerLengthInput, wallSizeInput;
-    let useWallMarkerChk, wallIdInput, laserIdInput, holdWallPoseChk, onlyForwardChk;
-    let useCalibChk, fovInput, calibText;
-    let refineLMChk;
-    let reprojGateChk, reprojThreshInput, reprojActionSel;
-    let lmNote;
-
-    // human UI
-    let human2dChk, humanSkelChk, humanPtsChk, humanEveryNInput, humanResSel, humanFpsSpan, humanNote;
-
-    // detectors
-    let detectorSubpix=null;
-    let detectorApriltag=null;
-    let apriltagCrashedOnce=false;
-
-    // camera params
-    let cameraMatrix=null;
-    let distCoeffs=null;
-
-    // axis
-    let axisObjPoints=null;
-    let axisImgPoints=null;
-    let tmpRvec=null;
-    let tmpTvec=null;
-
-    // marker size
-    let markerLength=0.04;
-    let wallHalf=0.5;
-
-    const settings = {
-      comboKey:"S_IPPE",
-      dictKey:"4X4_50",
-      useWallMarker:false,
-      wallId:0,
-      laserId:1,
-      holdWallPose:true,
-      onlyForward:true,
-
-      useCalibration:false,
-      fovDeg:70,
-      calibJSON:`{"K":[[800,0,320],[0,800,240],[0,0,1]],"D":[0,0,0,0,0]}`,
-
-      refineLM:false,
-      reprojGate:false,
-      reprojThresh:3.0,
-      reprojAction:"reject",
-
-      // human（軽量寄り）
-      human2d:true,
-      humanSkeleton:true,
-      humanPoints:false,
-      humanEveryN:4,
-      humanRes:192,
-
-      // cube mode
-      cubeMode:false,
-      cubeIdA:1,
-      cubeIdB:2,
-      cubeSize:0.04,
-
-      // screen aim
-      screenMode:true,
-      screenW:0.34,         // physical width [m]
-      screenH:0.21,         // physical height [m]
-      camYOffset:0.0,       // camera Y position relative to screen top edge [m]
-
-      // smoothing (One Euro)
-      smoothOn:true,
-      smoothMinCutoff:1.5,
-      smoothBeta:0.5,
-
-      // calibration board
-      calibCols:9,
-      calibRows:6,
-      calibSquare:0.025,
-      calibMode:false,
-    };
-
-    const COMBOS = [
-      { key:"S_IPPE", label:"SUBPIX+IPPE",   det:"sub", pnp:"IPPE_SQUARE", color:"cyan" },
-      { key:"S_ITER", label:"SUBPIX+ITER",   det:"sub", pnp:"ITERATIVE",   color:"#ff9900" },
-      { key:"A_IPPE", label:"APRILTAG+IPPE", det:"apr", pnp:"IPPE_SQUARE", color:"magenta" },
-      { key:"A_ITER", label:"APRILTAG+ITER", det:"apr", pnp:"ITERATIVE",   color:"lime" },
-    ];
-
-    // Pose cache
-    const lastGoodLaser = Object.create(null);
-    const lastGoodWall  = Object.create(null);
-
-    // FPS
-    let mainLoopId=null;
-    let previewLoopId=null;
-    let fpsLastT=performance.now(), fpsCount=0, fpsValue=0;
-
-    // ===== OpenCV 省メモリ: VideoCapture + Mats reuse =====
-    let cap=null;
-    let frameRGBA=null; // CV_8UC4
-    let frameGray=null; // CV_8UC1
-
-    // ===== PnP mats reuse =====
-    let pnpObj=null;  // 4x3
-    let pnpImg=null;  // 4x2
-    let pnpRvec=null; // 3x1
-    let pnpTvec=null; // 3x1
-    let pnpRmat=null; // 3x3
-    let pnpProj=null; // projected points
-
-    // ===== Cube mode mats =====
-    let cubeObj=null;   // 8x3
-    let cubeImg=null;   // 8x2
-    let cubeProj=null;  // projected
-    const lastGoodCube = Object.create(null);
-
-    // ===== Screen aim =====
-    let screenCanvas=null, screenCtx=null, screenReadout=null;
-    let fsTarget=null, fsCanvas=null, fsCtx=null;
-    let lastScreenHit=null; // {u,v,inside,distance,hitCam}
-    const shotLog=[]; // recorded shots in fullscreen mode
-
-    // ===== One Euro Filter (jitter reduction) =====
-    class LowPassFilter{
-      constructor(){ this.s=0; this.initialized=false; }
-      reset(){ this.initialized=false; }
-      filterWithAlpha(v, alpha){
-        if(!this.initialized){ this.s=v; this.initialized=true; }
-        else this.s = alpha*v + (1-alpha)*this.s;
-        return this.s;
-      }
-    }
-    class OneEuroFilter{
-      constructor(minCutoff=1.5, beta=0.5, dCutoff=1.0){
-        this.minCutoff=minCutoff; this.beta=beta; this.dCutoff=dCutoff;
-        this.x=new LowPassFilter(); this.dx=new LowPassFilter();
-        this.lastTime=null; this.freq=60; this.prevRaw=null;
-      }
-      reset(){ this.x.reset(); this.dx.reset(); this.lastTime=null; this.prevRaw=null; }
-      setParams(minCutoff,beta){ this.minCutoff=minCutoff; this.beta=beta; }
-      alpha(cutoff){ const te=1/this.freq; const tau=1/(2*Math.PI*cutoff); return 1/(1+tau/te); }
-      filter(value, ts){
-        if(this.lastTime!=null && ts!=null && ts>this.lastTime){ this.freq=1/(ts-this.lastTime); }
-        this.lastTime=ts;
-        const prev = (this.prevRaw!=null)? this.prevRaw : value;
-        const dvalue=(value-prev)*this.freq;
-        this.prevRaw=value;
-        const edvalue=this.dx.filterWithAlpha(dvalue, this.alpha(this.dCutoff));
-        const cutoff=this.minCutoff + this.beta*Math.abs(edvalue);
-        return this.x.filterWithAlpha(value, this.alpha(cutoff));
-      }
-    }
-    const euroU=new OneEuroFilter();
-    const euroV=new OneEuroFilter();
-
-    // ===== Camera calibration (chessboard) =====
-    let calibCols=9, calibRows=6, calibSquare=0.025;
-    let calibAuto=false;
-    let calibFrameCounter=0;
-    let calibLastCorners=null;
-    let calibFound=false;
-    let calibObjVec=null, calibImgVec=null, calibCount=0;
-    let calibLastCaptureT=0, calibLastRMS=null;
-    let calibCaptureRequested=false;
-    let calibStatusEl=null;
-
-    // ===== MediaPipe Pose（省メモリ） =====
-    let mpReady=false;
-    let pose=null;
-    let poseBusy=false;
-    let poseCanvas=null, poseCtx=null;
-    let humanFrameCounter=0;
-
-    const humanPts = new Float32Array(33*3);
-    const humanBBox = new Float32Array(4);
-    let humanHas=false;
-
-    let humanFpsLastT=performance.now(), humanFpsCount=0, humanFpsValue=0;
-
-    // MediaPipe indices
-    const L_SHO=11, R_SHO=12, L_ELB=13, R_ELB=14, L_WRI=15, R_WRI=16;
-    const L_HIP=23, R_HIP=24, L_KNE=25, R_KNE=26, L_ANK=27, R_ANK=28;
-    const SKELETON_EDGES = [
-      [L_SHO, R_SHO],
-      [L_SHO, L_ELB], [L_ELB, L_WRI],
-      [R_SHO, R_ELB], [R_ELB, R_WRI],
-      [L_SHO, L_HIP], [R_SHO, R_HIP],
-      [L_HIP, R_HIP],
-      [L_HIP, L_KNE], [L_KNE, L_ANK],
-      [R_HIP, R_KNE], [R_KNE, R_ANK],
-    ];
-    const KEYPOINTS_MAIN = [L_SHO,R_SHO,L_ELB,R_ELB,L_WRI,R_WRI,L_HIP,R_HIP,L_KNE,R_KNE,L_ANK,R_ANK];
-
-    // ========= utils =========
-    function saveSettings(){ localStorage.setItem("aruco_pose_fix", JSON.stringify(settings)); }
-    function loadSettings(){ try{ const s=localStorage.getItem("aruco_pose_fix"); if(s) Object.assign(settings, JSON.parse(s)); }catch(e){} }
-
-    function setStatus(msg){ if(statusDiv) statusDiv.textContent = msg; }
-    function logDebug(msg){ console.log(msg); if(debugDiv) debugDiv.textContent = msg; }
-
-    function hook(el,fn){ if(!el) return; el.addEventListener("change",fn); el.addEventListener("input",fn); }
-
-    function setIfExists(obj,key,value,applied){
-      if (obj && (key in obj)) { try{ obj[key]=value; applied.push(`${key}=${value}`);}catch(e){applied.push(`${key}(fail)`);} return true; }
-      return false;
-    }
-
-    // ========= Camera init =========
-    async function startCamera(){
-      setStatus("カメラ開始…（許可後、すぐプレビュー表示）");
-      video.autoplay = true;
-      video.muted = true;
-      video.playsInline = true;
-      video.setAttribute("playsinline",""); // iOS Safari
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width:{ideal:640}, height:{ideal:480} },
-        audio: false
-      });
-
-      video.srcObject = stream;
-
-      // play first (blocking is absorbed by the canplay wait below)
-      try{ await video.play(); }catch(e){ console.warn("video.play() blocked/failed:", e); }
-
-      // wait until frame data is available (readyState>=2 == HAVE_CURRENT_DATA)
-      await new Promise((resolve, reject)=>{
-        const t=setTimeout(()=>{
-          if(video.videoWidth>0 && video.videoHeight>0) resolve();
-          else reject(new Error("canplay timeout"));
-        }, 8000);
-
-        if(video.readyState>=2 && video.videoWidth>0 && video.videoHeight>0){
-          clearTimeout(t); resolve(); return;
-        }
-        video.addEventListener("canplay", ()=>{ clearTimeout(t); resolve(); }, {once:true});
-        video.addEventListener("loadedmetadata", ()=>{
-          if(video.videoWidth>0 && video.videoHeight>0){ clearTimeout(t); resolve(); }
-        }, {once:true});
-      });
-
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-
-      // OpenCV.js の VideoCapture は HTML属性 video.width / video.height を見る。
-      // ここで明示的に同期させないと cap.read() が
-      // "Bad size of input mat: the size should be same as the video." を投げる。
-      video.width  = video.videoWidth;
-      video.height = video.videoHeight;
-
-      const size3d = Math.min(video.videoWidth, video.videoHeight);
-      canvas3d.width = size3d;
-      canvas3d.height = size3d;
-
-      cameraReady = true;
-      setStatus(`カメラ準備OK (${video.videoWidth}x${video.videoHeight})：プレビュー中…`);
-
-      startPreviewLoop();
-      maybeStartProcessing();
-    }
-
-    function startPreviewLoop(){
-      if (previewLoopId) cancelAnimationFrame(previewLoopId);
-
-      const loop = ()=>{
-        previewLoopId = requestAnimationFrame(loop);
-        if (!cameraReady) return;
-        if (processingStarted) return;
-        if (video.readyState < 2) return;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        // heartbeat — but don't clobber the OpenCV init diagnostic while waiting
-        if(debugDiv && cvReady){
-          debugDiv.textContent =
-            `PREVIEW中（OpenCV準備完了・まもなく処理開始）\n`+
-            `cvReady=${cvReady} cameraReady=${cameraReady} processing=${processingStarted}\n`+
-            `video=${video.videoWidth}x${video.videoHeight} readyState=${video.readyState}`;
-        }
-      };
-      loop();
-    }
-
-    function stopPreviewLoop(){
-      if (previewLoopId) cancelAnimationFrame(previewLoopId);
-      previewLoopId = null;
-    }
-
-    // ========= MediaPipe removed =========
-    // 人体骨格(MediaPipe)は削除しました。以下は呼び出し互換のための空スタブです。
-    function onMediapipePoseLoaded(){}
-    function resizePoseCanvas(){}
-    function maybeInitPose(){}
-    function onPoseResults(res){}
-    function requestHumanDetectionIfNeeded(){}
-    function drawHumanOverlay2D(){}
-
-    // ========= OpenCV load =========
-    function initApp(){
-      statusDiv=document.getElementById("status");
-      debugDiv=document.getElementById("debug");
-
-      video=document.getElementById("video");
-      canvas=document.getElementById("canvas");
-      canvas3d=document.getElementById("canvas3d");
-
-      // ---- Wire the camera button FIRST, before any other init that could throw.
-      // This guarantees the "カメラ開始" button always responds even if some later
-      // setup step fails. getUserMedia here is what triggers the permission dialog.
-      (function wireStartButtonEarly(){
-        const startBtn = document.getElementById("startBtn");
-        if(!startBtn) return;
-        let cameraStarting = false;
-        startBtn.addEventListener("click", ()=>{
-          if(cameraReady || cameraStarting) return;
-          cameraStarting = true;
-          startBtn.disabled = true;
-          startBtn.textContent = "カメラ起動中…";
-          setStatus("カメラ開始…（許可ダイアログが出たら「許可」）");
-          startCamera().then(()=>{
-            if(startBtn.parentElement) startBtn.parentElement.style.display="none";
-          }).catch(err=>{
-            console.error(err);
-            cameraStarting = false;
-            startBtn.disabled = false;
-            startBtn.textContent = "▶ カメラ開始（再試行）";
-            setStatus("カメラ取得失敗: " + (err && err.name ? err.name : err));
-          });
-        });
-      })();
-
-      ctx=canvas.getContext("2d", {willReadFrequently:true});
-      ctx3d=canvas3d.getContext("2d");
-
-      comboSel=document.getElementById("comboSel");
-      fpsSpan=document.getElementById("fpsSpan");
-      dictSel=document.getElementById("dictSel");
-      dictNoteEl=document.getElementById("dictNote");
-
-      markerLengthInput=document.getElementById("markerLengthInput");
-      wallSizeInput=document.getElementById("wallSizeInput");
-
-      useWallMarkerChk=document.getElementById("useWallMarkerChk");
-      wallIdInput=document.getElementById("wallIdInput");
-      laserIdInput=document.getElementById("laserIdInput");
-      holdWallPoseChk=document.getElementById("holdWallPoseChk");
-      onlyForwardChk=document.getElementById("onlyForwardChk");
-
-      useCalibChk=document.getElementById("useCalibChk");
-      fovInput=document.getElementById("fovInput");
-      calibText=document.getElementById("calibText");
-
-      refineLMChk=document.getElementById("refineLMChk");
-      reprojGateChk=document.getElementById("reprojGateChk");
-      reprojThreshInput=document.getElementById("reprojThreshInput");
-      reprojActionSel=document.getElementById("reprojActionSel");
-      lmNote=document.getElementById("lmNote");
-
-      // (human UI removed)
-
-      // Cube mode UI
-      const cubeModeChk    = document.getElementById("cubeModeChk");
-      const cubeIdAInput   = document.getElementById("cubeIdAInput");
-      const cubeIdBInput   = document.getElementById("cubeIdBInput");
-      const cubeSizeInput  = document.getElementById("cubeSizeInput");
-
-      // Screen aim UI
-      const screenModeChk  = document.getElementById("screenModeChk");
-      const screenWInput   = document.getElementById("screenWInput");
-      const screenHInput   = document.getElementById("screenHInput");
-      const camYOffsetInput= document.getElementById("camYOffsetInput");
-      const fullscreenBtn  = document.getElementById("fullscreenBtn");
-      screenCanvas         = document.getElementById("screenCanvas");
-      screenCtx            = screenCanvas.getContext("2d");
-      screenReadout        = document.getElementById("screenReadout");
-      fsTarget             = document.getElementById("fsTarget");
-      fsCanvas             = document.getElementById("fsCanvas");
-      fsCtx                = fsCanvas.getContext("2d");
-
-      // Smoothing UI
-      const smoothOnChk         = document.getElementById("smoothOnChk");
-      const smoothMinCutoffInput= document.getElementById("smoothMinCutoffInput");
-      const smoothBetaInput     = document.getElementById("smoothBetaInput");
-
-      // Calibration UI
-      const calibColsInput   = document.getElementById("calibColsInput");
-      const calibRowsInput   = document.getElementById("calibRowsInput");
-      const calibSquareInput = document.getElementById("calibSquareInput");
-      const calibStartBtn    = document.getElementById("calibStartBtn");
-      const calibStopBtn     = document.getElementById("calibStopBtn");
-      const calibBoardBtn    = document.getElementById("calibBoardBtn");
-      const calibCaptureBtn  = document.getElementById("calibCaptureBtn");
-      const calibAutoChk     = document.getElementById("calibAutoChk");
-      const calibComputeBtn  = document.getElementById("calibComputeBtn");
-      const calibResetBtn    = document.getElementById("calibResetBtn");
-      calibStatusEl          = document.getElementById("calibStatus");
-
-      // Copy debug button
-      const copyBtn = document.getElementById("copyDebugBtn");
-      const copyMsg = document.getElementById("copyDebugMsg");
-      if(copyBtn){
-        copyBtn.addEventListener("click", async ()=>{
-          const text = debugDiv ? (debugDiv.textContent || "") : "";
-          try{
-            if(navigator.clipboard && navigator.clipboard.writeText){
-              await navigator.clipboard.writeText(text);
-            }else{
-              // フォールバック（HTTP環境や古いブラウザ用）
-              const ta=document.createElement("textarea");
-              ta.value=text;
-              ta.style.position="fixed"; ta.style.opacity="0";
-              document.body.appendChild(ta);
-              ta.select();
-              document.execCommand("copy");
-              document.body.removeChild(ta);
-            }
-            if(copyMsg){
-              copyMsg.textContent="コピーしました";
-              copyMsg.style.color="#0f0";
-              setTimeout(()=>{ copyMsg.textContent=""; }, 1500);
-            }
-          }catch(e){
-            if(copyMsg){
-              copyMsg.textContent="コピー失敗: "+e;
-              copyMsg.style.color="#f66";
-            }
-          }
-        });
-      }
-
-      loadSettings();
-
-      comboSel.value=settings.comboKey;
-      if(dictSel) dictSel.value=settings.dictKey;
-
-      useWallMarkerChk.checked=settings.useWallMarker;
-      wallIdInput.value=settings.wallId;
-      laserIdInput.value=settings.laserId;
-      holdWallPoseChk.checked=settings.holdWallPose;
-      onlyForwardChk.checked=settings.onlyForward;
-
-      useCalibChk.checked=settings.useCalibration;
-      fovInput.value=settings.fovDeg;
-      calibText.value=settings.calibJSON;
-
-      refineLMChk.checked=settings.refineLM;
-      reprojGateChk.checked=settings.reprojGate;
-      reprojThreshInput.value=settings.reprojThresh;
-      reprojActionSel.value=settings.reprojAction;
-
-      // (human UI init removed)
-
-      cubeModeChk.checked  = settings.cubeMode;
-      cubeIdAInput.value   = settings.cubeIdA;
-      cubeIdBInput.value   = settings.cubeIdB;
-      cubeSizeInput.value  = settings.cubeSize;
-
-      screenModeChk.checked  = settings.screenMode;
-      screenWInput.value     = settings.screenW;
-      screenHInput.value     = settings.screenH;
-      camYOffsetInput.value  = settings.camYOffset;
-
-      smoothOnChk.checked          = settings.smoothOn;
-      smoothMinCutoffInput.value   = settings.smoothMinCutoff;
-      smoothBetaInput.value        = settings.smoothBeta;
-      euroU.setParams(settings.smoothMinCutoff, settings.smoothBeta);
-      euroV.setParams(settings.smoothMinCutoff, settings.smoothBeta);
-
-      calibColsInput.value   = settings.calibCols;
-      calibRowsInput.value   = settings.calibRows;
-      calibSquareInput.value = settings.calibSquare;
-      calibCols=settings.calibCols; calibRows=settings.calibRows; calibSquare=settings.calibSquare;
-      settings.calibMode=false; // always start off
-
-      // Smoothing hooks
-      hook(smoothOnChk,()=>{ settings.smoothOn=smoothOnChk.checked; euroU.reset(); euroV.reset(); saveSettings(); });
-      hook(smoothMinCutoffInput,()=>{
-        const v=parseFloat(smoothMinCutoffInput.value);
-        if(!isNaN(v) && v>0){ settings.smoothMinCutoff=v; euroU.setParams(v,settings.smoothBeta); euroV.setParams(v,settings.smoothBeta); saveSettings(); }
-      });
-      hook(smoothBetaInput,()=>{
-        const v=parseFloat(smoothBetaInput.value);
-        if(!isNaN(v) && v>=0){ settings.smoothBeta=v; euroU.setParams(settings.smoothMinCutoff,v); euroV.setParams(settings.smoothMinCutoff,v); saveSettings(); }
-      });
-
-      // Calibration hooks
-      hook(calibColsInput,()=>{ const v=parseInt(calibColsInput.value||"9",10); if(v>=3){ calibCols=v; settings.calibCols=v; saveSettings(); } });
-      hook(calibRowsInput,()=>{ const v=parseInt(calibRowsInput.value||"6",10); if(v>=3){ calibRows=v; settings.calibRows=v; saveSettings(); } });
-      hook(calibSquareInput,()=>{ const v=parseFloat(calibSquareInput.value); if(!isNaN(v)&&v>0){ calibSquare=v; settings.calibSquare=v; saveSettings(); } });
-
-      calibStartBtn.addEventListener("click",()=>{
-        if(!cvReady){ setStatus("OpenCV未準備"); return; }
-        if(!calibObjVec) calibReset();
-        settings.calibMode=true;
-        setStatus("校正モード: 盤面を映してキャプチャしてください");
-      });
-      calibStopBtn.addEventListener("click",()=>{ settings.calibMode=false; setStatus("校正モード終了"); });
-      calibBoardBtn.addEventListener("click",()=> openCheckerboard());
-      calibCaptureBtn.addEventListener("click",()=>{ calibCaptureRequested=true; });
-      hook(calibAutoChk,()=>{ calibAuto=calibAutoChk.checked; });
-      calibComputeBtn.addEventListener("click",()=> calibCompute());
-      calibResetBtn.addEventListener("click",()=>{ calibReset(); if(calibStatusEl){ calibStatusEl.textContent="リセット済み（0枚）"; } });
-
-      hook(comboSel,()=>{ settings.comboKey=comboSel.value; saveSettings(); });
-      if(dictSel){
-        dictSel.addEventListener("change",()=>{
-          settings.dictKey=dictSel.value;
-          saveSettings();
-          if(cvReady && processingStarted){
-            try{ setupDetectors(); }catch(e){ if(dictNoteEl) dictNoteEl.textContent="辞書切替失敗: "+e; }
-          }
-        });
-      }
-
-      hook(markerLengthInput,()=>{
-        const v=parseFloat(markerLengthInput.value);
-        if(!isNaN(v) && v>0){
-          markerLength=v; settings.markerLength=v; saveSettings();
-          if (cvReady) { rebuildAxisObj(); rebuildPnPMats(); rebuildCubeObj(); }
-        }
-      });
-      hook(wallSizeInput,()=>{
-        const v=parseFloat(wallSizeInput.value);
-        if(!isNaN(v) && v>0){ wallHalf=v/2.0; settings.wallHalf=wallHalf; saveSettings(); }
-      });
-
-      hook(useWallMarkerChk,()=>{ settings.useWallMarker=useWallMarkerChk.checked; saveSettings(); });
-      hook(wallIdInput,()=>{ settings.wallId=parseInt(wallIdInput.value||"0",10); saveSettings(); });
-      hook(laserIdInput,()=>{ settings.laserId=parseInt(laserIdInput.value||"1",10); saveSettings(); });
-      hook(holdWallPoseChk,()=>{ settings.holdWallPose=holdWallPoseChk.checked; saveSettings(); });
-      hook(onlyForwardChk,()=>{ settings.onlyForward=onlyForwardChk.checked; saveSettings(); });
-
-      hook(useCalibChk,()=>{ settings.useCalibration=useCalibChk.checked; if(cvReady && cameraReady) rebuildCameraParams(); saveSettings(); });
-      hook(fovInput,()=>{ settings.fovDeg=parseFloat(fovInput.value||"70"); if(cvReady && cameraReady) rebuildCameraParams(); saveSettings(); });
-      hook(calibText,()=>{ settings.calibJSON=calibText.value; if(cvReady && cameraReady) rebuildCameraParams(); saveSettings(); });
-
-      hook(refineLMChk,()=>{ settings.refineLM=refineLMChk.checked; saveSettings(); });
-      hook(reprojGateChk,()=>{ settings.reprojGate=reprojGateChk.checked; saveSettings(); });
-      hook(reprojThreshInput,()=>{ settings.reprojThresh=parseFloat(reprojThreshInput.value||"3"); saveSettings(); });
-      hook(reprojActionSel,()=>{ settings.reprojAction=reprojActionSel.value; saveSettings(); });
-
-      // (human UI hooks removed)
-
-      hook(cubeModeChk,()=>{ settings.cubeMode=cubeModeChk.checked; saveSettings(); });
-      hook(cubeIdAInput,()=>{ settings.cubeIdA=parseInt(cubeIdAInput.value||"1",10); saveSettings(); });
-      hook(cubeIdBInput,()=>{ settings.cubeIdB=parseInt(cubeIdBInput.value||"2",10); saveSettings(); });
-      hook(cubeSizeInput,()=>{
-        const v=parseFloat(cubeSizeInput.value);
-        if(!isNaN(v) && v>0){
-          settings.cubeSize=v; saveSettings();
-          if(cvReady) rebuildCubeObj();
-        }
-      });
-
-      hook(screenModeChk,()=>{ settings.screenMode=screenModeChk.checked; saveSettings(); });
-      hook(screenWInput,()=>{
-        const v=parseFloat(screenWInput.value);
-        if(!isNaN(v) && v>0){ settings.screenW=v; saveSettings(); }
-      });
-      hook(screenHInput,()=>{
-        const v=parseFloat(screenHInput.value);
-        if(!isNaN(v) && v>0){ settings.screenH=v; saveSettings(); }
-      });
-      hook(camYOffsetInput,()=>{
-        const v=parseFloat(camYOffsetInput.value);
-        if(!isNaN(v)){ settings.camYOffset=v; saveSettings(); }
-      });
-
-      // Fullscreen target button
-      if(fullscreenBtn){
-        fullscreenBtn.addEventListener("click", ()=>{
-          enterFullscreenTarget();
-        });
-      }
-      // ESC to exit fullscreen target
-      document.addEventListener("keydown",(e)=>{
-        if(e.key==="Escape" && fsTarget && fsTarget.style.display==="block"){
-          exitFullscreenTarget();
-        }
-      });
-      // Click in fullscreen = record shot
-      if(fsCanvas){
-        fsCanvas.addEventListener("click",()=>{
-          if(lastScreenHit){
-            shotLog.push({...lastScreenHit, t:performance.now()});
-          }
-        });
-      }
-
-      markerLength = parseFloat(markerLengthInput.value);
-      wallHalf = parseFloat(wallSizeInput.value)/2.0;
-
-      setStatus("ライブラリ読込中…（「カメラ開始」は読込後に有効）");
-    }
-
-    // Dynamically load an external script (avoids async onload race conditions)
-    function loadScript(src){
-      return new Promise((resolve,reject)=>{
-        const s=document.createElement("script");
-        s.src=src; s.async=true;
-        s.onload=()=>resolve();
-        s.onerror=()=>reject(new Error("Failed to load: "+src));
-        document.head.appendChild(s);
-      });
-    }
-
-    // ========= OpenCV.js 自動フォールバック読み込み =========
-    // 候補URLを上から順に試し、cv.Mat が使えるようになったものを採用する。
-    // 各候補は「script読込 → 最大N秒 cv.Mat 出現待ち」。ダメなら次の候補へ。
-    const CV_SOURCES = [
-      { name:"jsDelivr techstark 4.10.0", url:"https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js" },
-      { name:"公式 docs 4.11.0",          url:"https://docs.opencv.org/4.11.0/opencv.js" },
-      { name:"公式 docs 4.10.0",          url:"https://docs.opencv.org/4.10.0/opencv.js" },
-      { name:"公式 docs 4.8.0",           url:"https://docs.opencv.org/4.8.0/opencv.js" },
-      { name:"公式 docs 4.5.5",           url:"https://docs.opencv.org/4.5.5/opencv.js" },
-      { name:"unpkg techstark 4.10.0",    url:"https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js" },
-      { name:"jsDelivr techstark 4.9.0",  url:"https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.3/dist/opencv.js" },
-    ];
-
-    // ローカル同梱 opencv.js があれば最優先（完全オフライン用）。
-    // HTMLと同じフォルダに opencv.js を置くと、これが最初に試される。
-    CV_SOURCES.unshift({ name:"ローカル同梱 opencv.js", url:"opencv.js", localOptional:true });
-
-    let cvBootHandled = false;
-
-    function finishCvReady(){
-      if(cvBootHandled) return;
-      if(!(window.cv && typeof window.cv.Mat === "function")) return;
-      cvBootHandled = true;
-      CV = window.cv;
-      cvReady = true;
-      afterCvReady();
-    }
-
-    // 1つの候補URLを試す。cv.Mat が使えるようになったら resolve(true)、失敗で resolve(false)。
-    function tryOneSource(src, perSourceTimeoutMs){
-      return new Promise((resolve)=>{
-        let settled = false;
-        const done = (ok)=>{ if(settled) return; settled = true; resolve(ok); };
-
-        // techstark等でグローバル Module 衝突を避けるため、毎回リセットはしない。
-        // 事前に cv をクリア（前の候補の残骸を排除）。
-        try{ if(!(window.cv && typeof window.cv.Mat === "function")) { window.cv = undefined; } }catch(e){}
-
-        const s = document.createElement("script");
-        s.src = src.url;
-        s.async = true;
-
-        let scriptFailed = false;
-        s.onerror = ()=>{ scriptFailed = true; /* ポーリング側でタイムアウト処理 */ };
-        s.onload  = ()=>{ /* onloadしても cv 準備は非同期なのでポーリングで確認 */ };
-
-        // cv を待つポーリング（Promise/コールバック両対応）
-        let waited = 0;
-        const step = 250;
-        const iv = setInterval(()=>{
-          waited += step;
-
-          // 準備完了？
-          if(window.cv && typeof window.cv.Mat === "function"){
-            clearInterval(iv); done(true); return;
-          }
-          // cv が Promise（thenable）なら解決を試みる
-          if(window.cv && typeof window.cv.then === "function" && typeof window.cv.Mat !== "function"){
-            Promise.resolve(window.cv).then(m=>{
-              if(m && typeof m.Mat === "function"){ window.cv = m; }
-            }, ()=>{});
-          }
-          // cv がモジュールオブジェクトで未初期化ならコールバックを仕込む
-          if(window.cv && typeof window.cv === "object" && typeof window.cv.then !== "function"
-             && !window.cv.__hooked && typeof window.cv.Mat !== "function"){
-            window.cv.__hooked = true;
-            try{ window.cv.onRuntimeInitialized = ()=>{ /* 次のtickで検出 */ }; }catch(e){}
-          }
-
-          // 進捗表示
-          const t = typeof window.cv;
-          const hasMat = (window.cv && window.cv.Mat) ? "Mat=OK" : "Mat無";
-          if(debugDiv) debugDiv.textContent =
-            `OpenCV 読み込み試行中…\n`+
-            `候補: ${src.name}\n`+
-            `URL: ${src.url}\n`+
-            `typeof cv = ${t} / ${hasMat}\n`+
-            `script onerror = ${scriptFailed}\n`+
-            `この候補の経過: ${(waited/1000).toFixed(1)}s / 上限 ${(perSourceTimeoutMs/1000)}s`;
-
-          // scriptロード失敗が確定し、まだ cv も無ければ早めに打ち切り
-          if(scriptFailed && !(window.cv)){
-            clearInterval(iv); done(false); return;
-          }
-          // この候補のタイムアウト
-          if(waited >= perSourceTimeoutMs){
-            clearInterval(iv); done(false); return;
-          }
-        }, step);
-      });
-    }
-
-    async function boot(){
-      setStatus("OpenCV.js 読み込み中…（複数候補を自動試行）");
-
-      // 既に読み込み済みなら即完了
-      if(window.cv && typeof window.cv.Mat === "function"){ finishCvReady(); return; }
-
-      const tried = [];
-      for(let i=0;i<CV_SOURCES.length;i++){
-        const src = CV_SOURCES[i];
-        // ローカル同梱は「存在すれば」使う。無ければ即失敗して次へ（短めタイムアウト）。
-        const timeout = src.localOptional ? 4000 : 20000;
-
-        setStatus(`OpenCV 試行 ${i+1}/${CV_SOURCES.length}: ${src.name}`);
-        const ok = await tryOneSource(src, timeout);
-        tried.push(`${ok?"○":"×"} ${src.name}`);
-
-        if(ok && window.cv && typeof window.cv.Mat === "function"){
-          setStatus(`OpenCV 準備OK（採用: ${src.name}）`);
-          if(debugDiv) debugDiv.textContent =
-            `OpenCV 読み込み成功！\n採用: ${src.name}\nURL: ${src.url}\n\n試行結果:\n`+tried.join("\n");
-          finishCvReady();
-          return;
-        }
-      }
-
-      // 全候補失敗
-      setStatus("OpenCV.js を読み込めませんでした（全候補失敗）。");
-      if(debugDiv) debugDiv.textContent =
-        "OpenCV.js の読み込みに全候補で失敗しました。\n\n試行結果:\n"+tried.join("\n")+
-        "\n\n対処:\n"+
-        "・インターネット接続を確認してください（初回はネット必須）。\n"+
-        "・file:// で開いている場合、docs.opencv.org はCORSで弾かれます → GitHub Pages 等の https で開いてください。\n"+
-        "・完全オフラインにしたい場合は、opencv.js をHTMLと同じフォルダに置いてください（自動で最優先採用します）。";
-    }
-
-    function afterCvReady(){
-      if(cameraReady){
-        setStatus("OpenCV準備OK：処理開始します");
-        maybeStartProcessing();
-      }else{
-        setStatus("準備OK：「カメラ開始」を押してください");
-      }
-    }
-
-    function maybeStartProcessing(){
-      if (!cvReady || !cameraReady) return;
-      if (processingStarted) return;
-
-      const steps=[];
-      function run(name, fn){
-        try{ fn(); steps.push(name+":OK"); return true; }
-        catch(e){ console.error(name, e); steps.push(name+":FAIL("+(e&&e.message?e.message:e)+")"); return false; }
-      }
-
-      run("rebuildCameraParams", rebuildCameraParams);
-      run("rebuildAxisObj", rebuildAxisObj);
-      run("rebuildPnPMats", rebuildPnPMats);
-      run("rebuildCubeObj", rebuildCubeObj);
-      const detOk = run("setupDetectors", setupDetectors);
-      const matOk = run("setupFrameMats", setupFrameMats);
-      run("maybeInitPose", maybeInitPose);
-      run("calibReset", calibReset);
-
-      // Show setup outcome in the debug panel so failures are visible.
-      if(debugDiv) debugDiv.textContent = "SETUP:\n" + steps.join("\n");
-
-      if(!matOk){
-        setStatus("フレーム初期化に失敗。処理を開始できません。");
-        return;
-      }
-
-      // Start the loop even if detector setup failed, so FPS/diagnostics still show
-      // and the user can switch the dictionary to fix detection.
-      processingStarted = true;
-      stopPreviewLoop();
-      setStatus(detOk ? "処理開始（ArUco + 3D + 人体）" : "処理開始（検出器の初期化に失敗。辞書を変更して再試行してください）");
-      tick();
-    }
-
-    // ========= OpenCV build blocks =========
-    function rebuildCameraParams(){
-      const cv2=CV;
-      if(cameraMatrix) cameraMatrix.delete();
-      if(distCoeffs) distCoeffs.delete();
-
-      const w=canvas.width, h=canvas.height;
-      let fx,fy,cx=w/2.0,cy=h/2.0,D;
-
-      if(!settings.useCalibration){
-        const fovRad=(settings.fovDeg*Math.PI/180.0);
-        fx=w/(2.0*Math.tan(fovRad/2.0));
-        fy=fx;
-        D=[0,0,0,0,0];
-      }else{
-        try{
-          const obj=JSON.parse(settings.calibJSON);
-          fx=obj.K[0][0]; fy=obj.K[1][1];
-          cx=obj.K[0][2]; cy=obj.K[1][2];
-          D=obj.D || [0,0,0,0,0];
-        }catch(e){
-          settings.useCalibration=false;
-          useCalibChk.checked=false;
-          const fovRad=(settings.fovDeg*Math.PI/180.0);
-          fx=w/(2.0*Math.tan(fovRad/2.0));
-          fy=fx;
-          D=[0,0,0,0,0];
-        }
-      }
-      cameraMatrix=cv2.matFromArray(3,3,cv2.CV_64F,[fx,0,cx, 0,fy,cy, 0,0,1]);
-      distCoeffs=cv2.matFromArray(1,(Array.isArray(D)?D.length:5),cv2.CV_64F,(Array.isArray(D)?D:[0,0,0,0,0]));
-      lmNote.textContent = (!!cv2.solvePnPRefineLM) ? "" : "※ RefineLM 無いビルドの可能性（ONでも自動スキップ）";
-    }
-
-    function rebuildAxisObj(){
-      const cv2=CV;
-      if(axisObjPoints) axisObjPoints.delete();
-      if(axisImgPoints) axisImgPoints.delete();
-      axisObjPoints=cv2.matFromArray(4,3,cv2.CV_64F, [
-        0,0,0, markerLength,0,0, 0,markerLength,0,  0,0,markerLength
-      ]);
-      axisImgPoints=new cv2.Mat();
-      if(!tmpRvec) tmpRvec=new cv2.Mat(3,1,cv2.CV_64F);
-      if(!tmpTvec) tmpTvec=new cv2.Mat(3,1,cv2.CV_64F);
-    }
-
-    function rebuildPnPMats(){
-      const cv2=CV;
-      const half=markerLength/2.0;
-
-      pnpObj?.delete?.(); pnpImg?.delete?.(); pnpRvec?.delete?.(); pnpTvec?.delete?.(); pnpRmat?.delete?.(); pnpProj?.delete?.();
-
-      // ArUco detectMarkers returns corners in marker-local order: TL, TR, BR, BL
-      // (top-left, top-right, bottom-right, bottom-left in the marker's own frame)
-      pnpObj = cv2.matFromArray(4,3,cv2.CV_64F, [
-        -half, half, 0,
-         half, half, 0,
-         half,-half, 0,
-        -half,-half, 0
-      ]);
-      pnpImg = new cv2.Mat(4,2,cv2.CV_64F);
-      pnpRvec = new cv2.Mat(3,1,cv2.CV_64F);
-      pnpTvec = new cv2.Mat(3,1,cv2.CV_64F);
-      pnpRmat = new cv2.Mat(3,3,cv2.CV_64F);
-      pnpProj = new cv2.Mat();
-    }
-
-    // Cube model (rigid 2-face marker arrangement)
-    //
-    //   Cube frame:
-    //     +X axis -> normal of marker A face
-    //     +Y axis -> normal of marker B face
-    //     +Z axis -> shared "up" of both markers (i.e., marker's local +Y in image = cube +Z)
-    //
-    //   Marker A on +X face, marker B on +Y face, shared edge along (cs, cs, *).
-    //   Laser origin = (cs, cs, 0) (shared edge midpoint)
-    //   Laser direction = (1, 1, 0)/sqrt(2)  (bisector of two face normals, 45° from each)
-    //
-    //   Marker A corner mapping (marker_local -> cube):
-    //     marker_x -> cube +Y,  marker_y -> cube +Z,  marker_z -> cube +X
-    //   Marker B corner mapping:
-    //     marker_x -> cube -X,  marker_y -> cube +Z,  marker_z -> cube +Y
-    function rebuildCubeObj(){
-      const cv2=CV;
-      cubeObj?.delete?.();
-      cubeImg?.delete?.();
-      cubeProj?.delete?.();
-
-      const h  = markerLength * 0.5;
-      const cs = settings.cubeSize * 0.5;
-
-      // 8 corners (A.TL,TR,BR,BL then B.TL,TR,BR,BL) in cube frame
-      cubeObj = cv2.matFromArray(8, 3, cv2.CV_64F, [
-        // Marker A on +X face
-         cs, -h,  h,   // A.TL  (marker_x=-h -> cube_y=-h, marker_y=+h -> cube_z=+h)
-         cs,  h,  h,   // A.TR
-         cs,  h, -h,   // A.BR
-         cs, -h, -h,   // A.BL
-        // Marker B on +Y face
-          h,  cs,  h,  // B.TL  (marker_x=-h -> cube_x=+h, marker_y=+h -> cube_z=+h)
-         -h,  cs,  h,  // B.TR
-         -h,  cs, -h,  // B.BR
-          h,  cs, -h,  // B.BL
-      ]);
-      cubeImg  = new cv2.Mat(8, 2, cv2.CV_64F);
-      cubeProj = new cv2.Mat();
-    }
-
-    function estimateCubePoseFromTwoCorners(cornersA8, cornersB8, cv2){
-      // Fill cubeImg with 8 image points (4 from A, 4 from B)
-      const ip = cubeImg.data64F;
-      for(let i=0;i<8;i++) ip[i]     = cornersA8[i];
-      for(let i=0;i<8;i++) ip[8 + i] = cornersB8[i];
-
-      const ok=cv2.solvePnP(cubeObj, cubeImg, cameraMatrix, distCoeffs, pnpRvec, pnpTvec, false, cv2.SOLVEPNP_ITERATIVE);
-      if(!ok) return null;
-
-      if(settings.refineLM && cv2.solvePnPRefineLM){
-        try{ cv2.solvePnPRefineLM(cubeObj,cubeImg,cameraMatrix,distCoeffs,pnpRvec,pnpTvec); }catch(e){}
-      }
-
-      cv2.Rodrigues(pnpRvec, pnpRmat);
-      cv2.projectPoints(cubeObj, pnpRvec, pnpTvec, cameraMatrix, distCoeffs, cubeProj);
-
-      const pr=cubeProj.data64F;
-      let sum=0;
-      for(let i=0;i<8;i++){
-        const u=pr[i*2+0], v=pr[i*2+1];
-        const tu = (i<4) ? cornersA8[i*2+0]   : cornersB8[(i-4)*2+0];
-        const tv = (i<4) ? cornersA8[i*2+1]   : cornersB8[(i-4)*2+1];
-        const du=u-tu, dv=v-tv;
-        sum += du*du + dv*dv;
-      }
-      const reprojErr=Math.sqrt(sum/8.0);
-
-      const rv=pnpRvec.data64F, tv=pnpTvec.data64F, R=pnpRmat.data64F;
-      return {
-        rvec:[rv[0],rv[1],rv[2]],
-        tvec:[tv[0],tv[1],tv[2]],
-        R:[R[0],R[1],R[2], R[3],R[4],R[5], R[6],R[7],R[8]],
-        dist:Math.hypot(tv[0],tv[1],tv[2]),
-        reprojErr,
-        isCube:true,
-      };
-    }
-
-    // Transform a point/vector from cube frame to camera frame given cube pose
-    function cubeToCamera(pose, p, isVector){
-      const R=pose.R, t=pose.tvec;
-      const x=R[0]*p[0]+R[1]*p[1]+R[2]*p[2];
-      const y=R[3]*p[0]+R[4]*p[1]+R[5]*p[2];
-      const z=R[6]*p[0]+R[7]*p[1]+R[8]*p[2];
-      return isVector ? [x,y,z] : [x+t[0], y+t[1], z+t[2]];
-    }
-
-    // Returns {origin, direction} of the laser ray in camera frame for given pose
-    function getLaserRay(pose){
-      if(!pose) return null;
-      if(pose.isCube){
-        const cs = settings.cubeSize * 0.5;
-        const inv = 1.0 / Math.sqrt(2.0);
-        const origin    = cubeToCamera(pose, [cs, cs, 0], false);
-        const direction = cubeToCamera(pose, [inv, inv, 0], true);
-        return { origin, direction };
-      }
-      // Single marker fallback: origin = marker center, direction = marker +Z
-      return { origin: pose.tvec, direction: getAxisFromR(pose.R, 2) };
-    }
-
-    // ========= Screen aim =========
-    //
-    // Camera coordinate convention (OpenCV): +X right, +Y down, +Z forward (toward user).
-    // The screen is treated as the plane Z=0 in camera frame.
-    // Screen rectangle extent (assuming camera is at horizontal center, just above/at screen top):
-    //   X: -W/2 .. +W/2
-    //   Y: camYOffset .. camYOffset + H   (camYOffset = distance from camera to screen top, +down)
-    //
-    // A ray P(t) = origin + t*direction hits Z=0 at t = -origin.z / direction.z.
-    // For a valid forward-aimed shot we require: origin.z > 0 and direction.z < 0 -> t > 0.
-    //
-    // u,v in [0,1] are normalized screen coords (u: left->right, v: top->bottom).
-    function computeScreenHit(ray){
-      if(!ray) return null;
-      const o=ray.origin, d=ray.direction;
-      if(Math.abs(d[2]) < 1e-6) return null;
-      const t = -o[2] / d[2];
-      if(t <= 0) return null; // ray points away from screen
-      const hx = o[0] + t*d[0];
-      const hy = o[1] + t*d[1];
-      const hz = o[2] + t*d[2]; // should be ~0
-      const W=settings.screenW, H=settings.screenH;
-      const u = (hx + W*0.5) / W;
-      const v = (hy - settings.camYOffset) / H;
-      const inside = (u>=0 && u<=1 && v>=0 && v<=1);
-      const distance = Math.hypot(hx - o[0], hy - o[1], hz - o[2]); // gun to screen along ray
-      return { u, v, inside, distance, hitCam:[hx,hy,hz], t };
-    }
-
-    function drawScreenView(hit){
-      if(!screenCtx || !screenCanvas) return;
-      const cw = screenCanvas.width, ch = screenCanvas.height;
-      const W=settings.screenW, H=settings.screenH;
-
-      // Aspect-fit screen rect inside the preview canvas
-      const margin=10;
-      const availW=cw-margin*2, availH=ch-margin*2;
-      const aspect = W/H;
-      let rw, rh;
-      if(availW/availH > aspect){ rh=availH; rw=rh*aspect; }
-      else                       { rw=availW; rh=rw/aspect; }
-      const rx=(cw-rw)*0.5, ry=(ch-rh)*0.5;
-
-      // Background
-      screenCtx.fillStyle="#000";
-      screenCtx.fillRect(0,0,cw,ch);
-
-      // Screen rect outline
-      screenCtx.strokeStyle="#555";
-      screenCtx.lineWidth=1;
-      screenCtx.strokeRect(rx, ry, rw, rh);
-
-      // Camera position marker (on the rect's top edge, horizontal center,
-      // adjusted by camYOffset relative to screen)
-      // camera Y in screen-space normalized [0..1] (negative = above top):
-      const camV = -settings.camYOffset / H; // top edge is v=0 in normalized; camera is at v = -camYOffset/H
-      const camX_norm = 0.5;
-      const camPxX = rx + camX_norm * rw;
-      const camPxY = ry + camV * rh;
-      screenCtx.fillStyle="#0ff";
-      screenCtx.beginPath();
-      screenCtx.arc(camPxX, camPxY, 4, 0, Math.PI*2);
-      screenCtx.fill();
-      screenCtx.fillStyle="#0ff";
-      screenCtx.font="11px monospace";
-      screenCtx.fillText("camera", camPxX+6, camPxY-2);
-
-      // Crosshair at hit point
-      if(hit){
-        const px = rx + hit.u * rw;
-        const py = ry + hit.v * rh;
-        const color = hit.inside ? "#0f0" : "#f80";
-        screenCtx.strokeStyle=color;
-        screenCtx.lineWidth=2;
-        screenCtx.beginPath();
-        screenCtx.moveTo(px-12, py); screenCtx.lineTo(px+12, py);
-        screenCtx.moveTo(px, py-12); screenCtx.lineTo(px, py+12);
-        screenCtx.stroke();
-        screenCtx.beginPath();
-        screenCtx.arc(px, py, 6, 0, Math.PI*2);
-        screenCtx.stroke();
-      }
-
-      if(screenReadout){
-        if(hit){
-          const inOut = hit.inside ? "INSIDE" : "outside";
-          screenReadout.textContent =
-            `u=${hit.u.toFixed(3)}  v=${hit.v.toFixed(3)}  [${inOut}]  dist=${hit.distance.toFixed(2)}m`;
-          screenReadout.style.color = hit.inside ? "#0f0" : "#f80";
-        }else{
-          screenReadout.textContent = "aim: no ray (gun behind / not detected)";
-          screenReadout.style.color = "#bbb";
-        }
-      }
-    }
-
-    // ========= Fullscreen target =========
-    function enterFullscreenTarget(){
-      if(!fsTarget) return;
-      fsTarget.style.display="block";
-      resizeFsCanvas();
-      // Try to actually enter the browser fullscreen (better aim ergonomics)
-      const reqFs = fsTarget.requestFullscreen || fsTarget.webkitRequestFullscreen;
-      if(reqFs){ try{ reqFs.call(fsTarget); }catch(e){} }
-      window.addEventListener("resize", resizeFsCanvas);
-      shotLog.length=0;
-    }
-    function exitFullscreenTarget(){
-      if(!fsTarget) return;
-      fsTarget.style.display="none";
-      window.removeEventListener("resize", resizeFsCanvas);
-      if(document.fullscreenElement){
-        try{ document.exitFullscreen(); }catch(e){}
-      }
-    }
-    function resizeFsCanvas(){
-      if(!fsCanvas) return;
-      fsCanvas.width  = window.innerWidth;
-      fsCanvas.height = window.innerHeight;
-    }
-    function drawFullscreenTarget(hit){
-      if(!fsCtx || !fsCanvas) return;
-      if(fsTarget.style.display!=="block") return;
-      const cw=fsCanvas.width, ch=fsCanvas.height;
-
-      // Background
-      fsCtx.fillStyle="#000";
-      fsCtx.fillRect(0,0,cw,ch);
-
-      // Grid (so user can see screen extent)
-      fsCtx.strokeStyle="#222";
-      fsCtx.lineWidth=1;
-      const N=10;
-      for(let i=1;i<N;i++){
-        const x=Math.round(cw*i/N), y=Math.round(ch*i/N);
-        fsCtx.beginPath(); fsCtx.moveTo(x,0); fsCtx.lineTo(x,ch); fsCtx.stroke();
-        fsCtx.beginPath(); fsCtx.moveTo(0,y); fsCtx.lineTo(cw,y); fsCtx.stroke();
-      }
-
-      // Past shots
-      fsCtx.fillStyle="rgba(255,80,80,0.8)";
-      for(const s of shotLog){
-        const px=s.u*cw, py=s.v*ch;
-        fsCtx.beginPath(); fsCtx.arc(px,py,8,0,Math.PI*2); fsCtx.fill();
-      }
-
-      // Live crosshair
-      if(hit){
-        const px=hit.u*cw, py=hit.v*ch;
-        const inside = hit.inside;
-        const color = inside ? "#0f0" : "#f80";
-        fsCtx.strokeStyle=color;
-        fsCtx.lineWidth=3;
-        fsCtx.beginPath();
-        fsCtx.moveTo(px-30,py); fsCtx.lineTo(px-10,py);
-        fsCtx.moveTo(px+10,py); fsCtx.lineTo(px+30,py);
-        fsCtx.moveTo(px,py-30); fsCtx.lineTo(px,py-10);
-        fsCtx.moveTo(px,py+10); fsCtx.lineTo(px,py+30);
-        fsCtx.stroke();
-        fsCtx.beginPath();
-        fsCtx.arc(px,py,14,0,Math.PI*2);
-        fsCtx.stroke();
-        // Readout
-        fsCtx.fillStyle=color;
-        fsCtx.font="16px monospace";
-        fsCtx.fillText(
-          `u=${hit.u.toFixed(3)} v=${hit.v.toFixed(3)} dist=${hit.distance.toFixed(2)}m shots=${shotLog.length}`,
-          16, ch-16
-        );
-      }else{
-        fsCtx.fillStyle="#888";
-        fsCtx.font="16px monospace";
-        fsCtx.fillText("no aim (gun not detected or pointing away) - shots="+shotLog.length, 16, ch-16);
-      }
-    }
-
-    // ========= Camera calibration =========
-    function calibReset(){
-      calibObjVec?.delete?.();
-      calibImgVec?.delete?.();
-      calibObjVec = new CV.MatVector();
-      calibImgVec = new CV.MatVector();
-      calibCount = 0;
-      calibLastRMS = null;
-      calibLastCorners?.delete?.();
-      calibLastCorners = null;
-      calibFound = false;
-    }
-
-    function calibDoCapture(){
-      if(!calibLastCorners) return;
-      const n=calibCols*calibRows;
-      // build object points (planar board, Z=0), CV_32FC3
-      const objArr=new Float32Array(n*3);
-      let k=0;
-      for(let r=0;r<calibRows;r++){
-        for(let c=0;c<calibCols;c++){
-          objArr[k++]=c*calibSquare;
-          objArr[k++]=r*calibSquare;
-          objArr[k++]=0;
-        }
-      }
-      const objMat=CV.matFromArray(n,1,CV.CV_32FC3,objArr);
-      const imgClone=calibLastCorners.clone();
-      calibObjVec.push_back(objMat);
-      calibImgVec.push_back(imgClone);
-      objMat.delete();
-      imgClone.delete();
-      calibCount++;
-    }
-
-    function calibCompute(){
-      if(!cvReady){ setStatus("OpenCV未準備"); return; }
-      if(calibCount<3){
-        if(calibStatusEl){ calibStatusEl.textContent="校正: 最低3枚（推奨10〜20枚）"; calibStatusEl.style.color="#f80"; }
-        return;
-      }
-      const K=new CV.Mat(), D=new CV.Mat();
-      const rvecs=new CV.MatVector(), tvecs=new CV.MatVector();
-      const imgSize=new CV.Size(canvas.width, canvas.height);
-      let rms=null;
-      try{
-        const criteria=new CV.TermCriteria(CV.TermCriteria_EPS+CV.TermCriteria_COUNT, 100, 1e-6);
-        rms=CV.calibrateCamera(calibObjVec, calibImgVec, imgSize, K, D, rvecs, tvecs, 0, criteria);
-      }catch(e){
-        try{
-          rms=CV.calibrateCamera(calibObjVec, calibImgVec, imgSize, K, D, rvecs, tvecs);
-        }catch(e2){
-          setStatus("校正計算に失敗: "+e2);
-          if(calibStatusEl){ calibStatusEl.textContent="計算失敗: "+e2; calibStatusEl.style.color="#f66"; }
-          K.delete(); D.delete(); rvecs.delete(); tvecs.delete();
-          return;
-        }
-      }
-      calibLastRMS = (typeof rms==="number") ? rms : null;
-
-      const Kd=K.data64F; // [fx,0,cx, 0,fy,cy, 0,0,1]
-      const fx=Kd[0], fy=Kd[4], cx=Kd[2], cy=Kd[5];
-      const Darr=Array.from(D.data64F);
-
-      const calibObj={ K:[[fx,0,cx],[0,fy,cy],[0,0,1]], D:Darr };
-      settings.calibJSON=JSON.stringify(calibObj);
-      settings.useCalibration=true;
-      if(calibText) calibText.value=settings.calibJSON;
-      if(useCalibChk) useCalibChk.checked=true;
-      saveSettings();
-      rebuildCameraParams();
-
-      if(calibStatusEl){
-        calibStatusEl.textContent=`校正完了: RMS=${calibLastRMS!=null?calibLastRMS.toFixed(4):"?"}px  枚数=${calibCount}  fx=${fx.toFixed(1)} fy=${fy.toFixed(1)}`;
-        calibStatusEl.style.color = (calibLastRMS!=null && calibLastRMS<0.5) ? "#0f0" : "#ff0";
-      }
-      setStatus("カメラ校正を適用しました（キャリブレーション値使用ON）");
-
-      K.delete(); D.delete(); rvecs.delete(); tvecs.delete();
-    }
-
-    // Runs one calibration frame: detect chessboard, draw, capture. Returns nothing.
-    function calibrationTick(cv2){
-      calibFrameCounter++;
-      const doDetect = (calibFrameCounter % 2)===0;
-
-      if(doDetect){
-        const corners=new cv2.Mat();
-        const patternSize={ width:calibCols, height:calibRows };
-        const flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_FAST_CHECK;
-        let found=false;
-        try{ found=cv2.findChessboardCorners(frameGray, patternSize, corners, flags); }
-        catch(e){ found=false; }
-
-        if(found){
-          try{
-            const criteria=new cv2.TermCriteria(cv2.TermCriteria_EPS+cv2.TermCriteria_COUNT, 30, 0.001);
-            cv2.cornerSubPix(frameGray, corners, {width:11,height:11}, {width:-1,height:-1}, criteria);
-          }catch(e){}
-          calibLastCorners?.delete?.();
-          calibLastCorners=corners.clone();
-          calibFound=true;
-        }else{
-          calibFound=false;
-        }
-        corners.delete();
-      }
-
-      // draw detected corners
-      if(calibFound && calibLastCorners){
-        const p=calibLastCorners.data32F;
-        const n=calibCols*calibRows;
-        ctx.strokeStyle="#0f0"; ctx.lineWidth=2;
-        ctx.beginPath();
-        for(let i=0;i<n;i++){ const x=p[i*2],y=p[i*2+1]; if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); }
-        ctx.stroke();
-        ctx.fillStyle="#0f0";
-        for(let i=0;i<n;i++){ ctx.beginPath(); ctx.arc(p[i*2],p[i*2+1],3,0,Math.PI*2); ctx.fill(); }
-      }
-
-      // capture logic
-      const now=performance.now();
-      let doCapture=false;
-      if(calibCaptureRequested){ doCapture=true; calibCaptureRequested=false; }
-      else if(calibAuto && calibFound && (now-calibLastCaptureT>900)) doCapture=true;
-      if(doCapture && calibFound && calibLastCorners){
-        calibDoCapture();
-        calibLastCaptureT=now;
-      }
-
-      // status
-      if(calibStatusEl){
-        calibStatusEl.textContent=`盤面=${calibFound?"検出OK":"未検出"}  枚数=${calibCount}  ${calibAuto?"[自動ON]":""}  ${calibLastRMS!=null?("前回RMS="+calibLastRMS.toFixed(4)):""}`;
-        calibStatusEl.style.color = calibFound ? "#0f0" : "#f80";
-      }
-
-      // debug
-      let msg=`CALIB MODE: ${calibCols}x${calibRows} inner corners, square=${calibSquare}m\n`;
-      msg+=`found=${calibFound} captured=${calibCount} auto=${calibAuto}\n`;
-      msg+=`10〜20枚集めて「計算実行」\n`;
-      msg+=`Cam=${canvas.width}x${canvas.height}\n`;
-      if(debugDiv) debugDiv.textContent=msg;
-    }
-
-    function openCheckerboard(){
-      const cols=calibCols+1, rows=calibRows+1; // squares = inner corners + 1
-      const sq=60;
-      const Wp=cols*sq, Hp=rows*sq;
-      // Build tag strings from a helper so no literal complete HTML-doc tags appear
-      // in this file's source (which can confuse HTML parsers / preview renderers).
-      const L="<", G=">";
-      let rects="";
-      for(let r=0;r<rows;r++){
-        for(let c=0;c<cols;c++){
-          if((r+c)%2===0) rects+=`${L}rect x="${c*sq}" y="${r*sq}" width="${sq}" height="${sq}" fill="black"/${G}`;
-        }
-      }
-      const svg=`${L}svg xmlns="http://www.w3.org/2000/svg" width="${Wp}" height="${Hp}" shape-rendering="crispEdges"${G}`+
-                `${L}rect x="0" y="0" width="${Wp}" height="${Hp}" fill="white"/${G}${rects}${L}/svg${G}`;
-      const css="html,body{margin:0;height:100%;background:#888;display:flex;flex-direction:column;"+
-                "justify-content:center;align-items:center;font-family:sans-serif;color:#fff}"+
-                ".info{position:fixed;top:8px;left:8px;font-size:13px;background:#0008;padding:6px 10px;border-radius:4px}"+
-                "svg{background:#fff;box-shadow:0 0 20px #0006}";
-      const html=`${L}!DOCTYPE html${G}${L}html${G}${L}head${G}${L}meta charset="utf-8"/${G}`+
-                 `${L}title${G}Checkerboard ${calibCols}x${calibRows}${L}/title${G}`+
-                 `${L}style${G}${css}${L}/style${G}${L}/head${G}`+
-                 `${L}body${G}${L}div class="info"${G}内側交点 ${calibCols}×${calibRows} / マス ${calibSquare}m を想定${L}br/${G}`+
-                 `全体が画面に収まるように表示し、平らに保ってください${L}/div${G}${svg}${L}/body${G}${L}/html${G}`;
-      // Open via Blob URL (more robust than document.write across environments).
-      try{
-        const blob=new Blob([html], {type:"text/html"});
-        const url=URL.createObjectURL(blob);
-        const w=window.open(url, "_blank");
-        if(!w){ setStatus("ポップアップがブロックされました。許可してください。"); }
-      }catch(e){
-        setStatus("チェッカーボード表示に失敗: "+e);
-      }
-    }
-
-    // Resolve the ArUco API. Depending on the OpenCV.js build, ArUco lives either
-    // under cv.aruco.* (namespaced) or directly as cv.aruco_* (flattened).
-    function getArucoApi(cv2){
-      const ns = cv2.aruco || null;
-      return {
-        ns,
-        getDict: (id)=> (ns && ns.getPredefinedDictionary) ? ns.getPredefinedDictionary(id)
-                        : (cv2.getPredefinedDictionary ? cv2.getPredefinedDictionary(id) : null),
-        DetectorParameters: (ns && ns.DetectorParameters) ? ns.DetectorParameters : cv2.aruco_DetectorParameters,
-        RefineParameters:   (ns && ns.RefineParameters)   ? ns.RefineParameters   : cv2.aruco_RefineParameters,
-        ArucoDetector:      (ns && ns.ArucoDetector)      ? ns.ArucoDetector      : cv2.aruco_ArucoDetector,
-        legacyDetect:       (ns && ns.detectMarkers) ? ns.detectMarkers.bind(ns)
-                            : (cv2.aruco_detectMarkers ? cv2.aruco_detectMarkers.bind(cv2) : null),
-      };
-    }
-
-    // Map a dictionary key string to the numeric constant, searching both namespaces.
-    function resolveDictId(cv2, key){
-      const name = "DICT_" + key; // e.g. DICT_4X4_50, DICT_ARUCO_ORIGINAL
-      const ns = cv2.aruco || {};
-      if(name in ns) return ns[name];
-      if(name in cv2) return cv2[name];
-      // Fallbacks
-      if(("DICT_4X4_50" in cv2)) return cv2.DICT_4X4_50;
-      if(ns && ("DICT_4X4_50" in ns)) return ns.DICT_4X4_50;
-      return 0;
-    }
-
-    // Holds the resolved API + current dictionary + whether we use modern detector or legacy.
-    let arucoApi=null;
-    let arucoDict=null;
-    let arucoUseLegacy=false;
-
-    function buildDictionary(){
-      const cv2=CV;
-      arucoApi = getArucoApi(cv2);
-      const id = resolveDictId(cv2, settings.dictKey);
-      arucoDict?.delete?.();
-      arucoDict = arucoApi.getDict(id);
-      if(!arucoDict){
-        if(dictNoteEl) dictNoteEl.textContent="この OpenCV.js ビルドに ArUco 辞書が見つかりません。";
-      }
-    }
-
-    function buildDetector(cornerRefineMethod){
-      const cv2=CV;
-      const api=arucoApi;
-      const applied=[];
-
-      let detectParams;
-      try{ detectParams=new api.DetectorParameters(); }
-      catch(e){ detectParams=new cv2.aruco_DetectorParameters(); }
-
-      setIfExists(detectParams,"adaptiveThreshWinSizeMin",3,applied);
-      setIfExists(detectParams,"adaptiveThreshWinSizeMax",100,applied);
-      setIfExists(detectParams,"adaptiveThreshWinSizeStep",10,applied);
-      setIfExists(detectParams,"minMarkerPerimeterRate",0.015,applied);
-      setIfExists(detectParams,"maxMarkerPerimeterRate",4.0,applied);
-
-      setIfExists(detectParams,"cornerRefinementMethod",cornerRefineMethod,applied);
-      setIfExists(detectParams,"cornerRefinementWinSize",7,applied);
-      setIfExists(detectParams,"cornerRefinementMaxIterations",50,applied);
-      setIfExists(detectParams,"cornerRefinementMinAccuracy",0.03,applied);
-
-      setIfExists(detectParams,"polygonalApproxAccuracyRate",0.03,applied);
-      setIfExists(detectParams,"useAruco3Detection",false,applied);
-      setIfExists(detectParams,"useOtsu",false,applied);
-
-      // Modern ArucoDetector API (preferred)
-      if(api.ArucoDetector){
-        try{
-          let refineParams=null;
-          try{ refineParams=new api.RefineParameters(10,3,true); }catch(e){ refineParams=null; }
-          const det = refineParams
-            ? new api.ArucoDetector(arucoDict, detectParams, refineParams)
-            : new api.ArucoDetector(arucoDict, detectParams);
-          arucoUseLegacy=false;
-          return {det, applied, params:detectParams};
-        }catch(e){
-          console.warn("ArucoDetector construction failed, will try legacy:", e);
-        }
-      }
-
-      // Legacy detectMarkers(image, dict, corners, ids, params) API
-      if(api.legacyDetect){
-        arucoUseLegacy=true;
-        // In legacy mode we carry dict+params and call the free function in safeDetect.
-        return { det:{ __legacy:true, dict:arucoDict, params:detectParams }, applied, params:detectParams };
-      }
-
-      throw new Error("この OpenCV.js ビルドには ArUco 検出器がありません");
-    }
-
-    function setupDetectors(){
-      // clean up previous detectors if any
-      try{ detectorSubpix?.delete?.(); }catch(e){}
-      try{ detectorApriltag?.delete?.(); }catch(e){}
-      detectorSubpix=null; detectorApriltag=null;
-
-      buildDictionary();
-      const s=buildDetector(1);
-      const a=buildDetector(3);
-      detectorSubpix=s.det;
-      detectorApriltag=a.det;
-      const mode = arucoUseLegacy ? "LEGACY detectMarkers" : "ArucoDetector";
-      if(dictNoteEl) dictNoteEl.textContent = `辞書=${settings.dictKey} / API=${mode}`;
-      logDebug(`Detectors ready [${mode}] dict=${settings.dictKey}\nSUBPIX(1): ${s.applied.join(", ")}`);
-    }
-
-    function setupFrameMats(){
-      const cv2=CV;
-      cap?.delete?.();
-      cap = new cv2.VideoCapture(video);
-
-      frameRGBA?.delete?.();
-      frameGray?.delete?.();
-      const vw = video.videoWidth  || canvas.width;
-      const vh = video.videoHeight || canvas.height;
-      frameRGBA = new cv2.Mat(vh, vw, cv2.CV_8UC4);
-      frameGray = new cv2.Mat(vh, vw, cv2.CV_8UC1);
-    }
-
-    // 動画解像度が動的に変わった場合（モバイル回転や stream renegotiation 等）に
-    // Mat サイズを合わせ直す。
-    // 重要: OpenCV.js の VideoCapture は HTML属性の video.width / video.height
-    // を内部チェックに使うので、毎回これを videoWidth/videoHeight に同期させる。
-    // これをやらないと "Bad size of input mat: the size should be same as the video." が出る。
-    function ensureFrameMatsMatchVideo(){
-      const cv2=CV;
-      const vw = video.videoWidth, vh = video.videoHeight;
-      if(!vw || !vh) return false;
-
-      // VideoCapture が見る HTML属性を必ず実解像度に揃える
-      if(video.width  !== vw) video.width  = vw;
-      if(video.height !== vh) video.height = vh;
-
-      if(!frameRGBA || frameRGBA.cols !== vw || frameRGBA.rows !== vh){
-        frameRGBA?.delete?.();
-        frameGray?.delete?.();
-        frameRGBA = new cv2.Mat(vh, vw, cv2.CV_8UC4);
-        frameGray = new cv2.Mat(vh, vw, cv2.CV_8UC1);
-
-        // canvas / cameraMatrix / pose canvas もサイズ追従
-        if(canvas.width !== vw || canvas.height !== vh){
-          canvas.width = vw;
-          canvas.height = vh;
-          const size3d = Math.min(vw, vh);
-          canvas3d.width = size3d;
-          canvas3d.height = size3d;
-          rebuildCameraParams();
-          if(poseCanvas) resizePoseCanvas();
-        }
-      }
-      return true;
-    }
-
-    function updateFPS(){
-      fpsCount++;
-      const now=performance.now();
-      const dt=now-fpsLastT;
-      if(dt>=500){
-        fpsValue=(fpsCount*1000.0)/dt;
-        fpsCount=0; fpsLastT=now;
-        fpsSpan.textContent=fpsValue.toFixed(1);
-      }
-    }
-
-    function safeDetect(detector, gray, cv2, tag){
-      const corners=new cv2.MatVector();
-      const ids=new cv2.Mat();
-      const rej=new cv2.MatVector();
-      try{
-        if(detector && detector.__legacy){
-          // Legacy free-function API: detectMarkers(image, dict, corners, ids, params, rejected)
-          arucoApi.legacyDetect(gray, detector.dict, corners, ids, detector.params, rej);
-        }else{
-          detector.detectMarkers(gray, corners, ids, rej);
-        }
-      }catch(e){
-        if(tag==="APR" && !apriltagCrashedOnce){
-          apriltagCrashedOnce=true;
-          console.error(e);
-          setStatus("APRILTAG(3)がWASM例外の可能性。SUBPIX推奨（継続）。");
-        }
-        corners.delete(); ids.delete(); rej.delete();
-        return { corners:new cv2.MatVector(), ids:new cv2.Mat() };
-      }finally{
-        rej.delete();
-      }
-      return { corners, ids };
-    }
-
-    function findMarkerIndexById(idsMat, wantedId){
-      if(!idsMat || idsMat.rows===0) return -1;
-      const arr=idsMat.data32S;
-      for(let i=0;i<arr.length;i++) if(arr[i]===wantedId) return i;
-      return -1;
-    }
-
-    // FIX: ArUcoが返す順序(マーカー基準のTL,TR,BR,BL)を破壊しない
-    // 画像座標でsum/diffソートすると、マーカーがどう回転しても
-    // 「画像上の左上が常にTL」になってしまい、ロール角(光軸まわり回転)が消える。
-    function getCornersFromMat(mat){
-      const p=mat.data32F;
-      if(!p || p.length<8) return null;
-      return [p[0],p[1], p[2],p[3], p[4],p[5], p[6],p[7]];
-    }
-
-    function getOrderedCornersFromMatVector(cornersVec, idx){
-      if(!cornersVec || idx<0 || idx>=cornersVec.size()) return null;
-      const m=cornersVec.get(idx);
-      let ordered=null;
-      try{ ordered=getCornersFromMat(m); }
-      finally{ m.delete(); }
-      return ordered;
-    }
-
-    function getPnPFlag(cv2, method){
-      return (method==="ITERATIVE") ? cv2.SOLVEPNP_ITERATIVE : cv2.SOLVEPNP_IPPE_SQUARE;
-    }
-
-    function estimatePoseFromCornersOrdered(ordered8, cv2, pnpMethod){
-      const ip = pnpImg.data64F;
-      ip[0]=ordered8[0]; ip[1]=ordered8[1];
-      ip[2]=ordered8[2]; ip[3]=ordered8[3];
-      ip[4]=ordered8[4]; ip[5]=ordered8[5];
-      ip[6]=ordered8[6]; ip[7]=ordered8[7];
-
-      const flag=getPnPFlag(cv2, pnpMethod);
-      const ok=cv2.solvePnP(pnpObj, pnpImg, cameraMatrix, distCoeffs, pnpRvec, pnpTvec, false, flag);
-      if(!ok) return null;
-
-      if(settings.refineLM && cv2.solvePnPRefineLM){
-        try{ cv2.solvePnPRefineLM(pnpObj,pnpImg,cameraMatrix,distCoeffs,pnpRvec,pnpTvec); }catch(e){}
-      }
-
-      cv2.Rodrigues(pnpRvec, pnpRmat);
-      cv2.projectPoints(pnpObj, pnpRvec, pnpTvec, cameraMatrix, distCoeffs, pnpProj);
-
-      const pr=pnpProj.data64F;
-      let sum=0;
-      for(let i=0;i<4;i++){
-        const u=pr[i*2+0], v=pr[i*2+1];
-        const du=u-ordered8[i*2+0];
-        const dv=v-ordered8[i*2+1];
-        sum += du*du + dv*dv;
-      }
-      const reprojErr=Math.sqrt(sum/4.0);
-
-      const rv=pnpRvec.data64F, tv=pnpTvec.data64F, R=pnpRmat.data64F;
-      return {
-        rvec:[rv[0],rv[1],rv[2]],
-        tvec:[tv[0],tv[1],tv[2]],
-        R:[R[0],R[1],R[2], R[3],R[4],R[5], R[6],R[7],R[8]],
-        dist:Math.hypot(tv[0],tv[1],tv[2]),
-        reprojErr
-      };
-    }
-
-    function applyReprojGate(pose, lastGoodPose){
-      if(!pose) return null;
-      if(!settings.reprojGate) return pose;
-      if(pose.reprojErr <= settings.reprojThresh) return pose;
-      if(settings.reprojAction==="accept") return pose;
-      if(settings.reprojAction==="hold") return lastGoodPose || null;
-      return null;
-    }
-
-    function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
-    function sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
-    function add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
-    function mul(a,s){ return [a[0]*s, a[1]*s, a[2]*s]; }
-
-    function getAxisFromR(R, col){
-      if(col===0) return [R[0],R[3],R[6]];
-      if(col===1) return [R[1],R[4],R[7]];
-      return [R[2],R[5],R[8]];
-    }
-
-    function computeHitPoint(laserPose, wallPose){
-      if(!laserPose) return null;
-      const ray=getLaserRay(laserPose);
-      if(!ray) return null;
-      const o=ray.origin;
-      const d=ray.direction;
-
-      let p0,n,xAxis,yAxis;
-      if(settings.useWallMarker){
-        if(!wallPose) return null;
-        p0=wallPose.tvec;
-        n=getAxisFromR(wallPose.R,2);
-        xAxis=getAxisFromR(wallPose.R,0);
-        yAxis=getAxisFromR(wallPose.R,1);
-      }else{
-        p0=[0,0,0]; n=[0,0,1]; xAxis=[1,0,0]; yAxis=[0,1,0];
-      }
-
-      const denom=dot(n,d);
-      if(Math.abs(denom)<1e-6) return {point:null};
-
-      const s=dot(n, sub(p0,o))/denom;
-      if(settings.onlyForward && s<=0) return {point:null};
-
-      const point=add(o, mul(d,s));
-      const rel=sub(point,p0);
-      const u=dot(rel,xAxis);
-      const v=dot(rel,yAxis);
-      const inside=(Math.abs(u)<=wallHalf && Math.abs(v)<=wallHalf);
-      return { point, uv:[u,v], inside, s, origin:o, direction:d };
-    }
-
-    function tick(){
-      try{
-        mainLoopId = requestAnimationFrame(tick);
-        if(!processingStarted) return;
-        // Live camera streams often plateau at readyState 2-3 (HAVE_CURRENT/FUTURE_DATA)
-        // and never reach exactly 4 (HAVE_ENOUGH_DATA). Require >=2, not ==4,
-        // otherwise processing never runs and the view stays frozen on preview.
-        if(video.readyState < 2) return;
-
-        updateFPS();
-
-        const cv2=CV;
-
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-        if(!ensureFrameMatsMatchVideo()) return;
-
-        // Read the frame from the canvas (drawImage already put the video there).
-        // This avoids cv.VideoCapture.read() which returns black/empty frames on
-        // some browsers (notably iOS Safari), causing "detects nothing".
-        let grayMean = 0;
-        try{
-          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          frameRGBA.data.set(imgData.data);
-          cv2.cvtColor(frameRGBA, frameGray, cv2.COLOR_RGBA2GRAY);
-        }catch(e){
-          // Fallback to VideoCapture if getImageData fails (e.g. tainted canvas)
-          try{ cap.read(frameRGBA); cv2.cvtColor(frameRGBA, frameGray, cv2.COLOR_RGBA2GRAY); }catch(e2){}
-        }
-        // mean brightness (diagnostic: ~0 means empty/black input)
-        try{
-          const gm = cv2.mean(frameGray);
-          grayMean = (gm && (gm[0]!==undefined)) ? gm[0] : 0;
-        }catch(e){ grayMean = -1; }
-
-        // Calibration mode: run chessboard flow and skip ArUco + human processing
-        if(settings.calibMode){
-          calibrationTick(cv2);
-          return;
-        }
-
-        requestHumanDetectionIfNeeded();
-
-        const active = COMBOS.find(c=>c.key===settings.comboKey) || COMBOS[0];
-        const detector = (active.det==="sub") ? detectorSubpix : detectorApriltag;
-        const tag = (active.det==="sub") ? "SUB" : "APR";
-
-        let det, count=0;
-        if(detector){
-          det = safeDetect(detector, frameGray, cv2, tag);
-          count = det.corners.size();
-        }else{
-          det = { corners:new cv2.MatVector(), ids:new cv2.Mat() };
-        }
-
-        // Draw an outline + ID label for EVERY detected marker, regardless of its ID.
-        const idsArr = (det.ids && det.ids.rows>0) ? det.ids.data32S : null;
-        ctx.lineWidth=2;
-        for(let i=0;i<count;i++){
-          const mat=det.corners.get(i);
-          try{
-            const p=mat.data32F;
-            // centroid for label placement
-            const cxp=(p[0]+p[2]+p[4]+p[6])/4;
-            const cyp=(p[1]+p[3]+p[5]+p[7])/4;
-
-            ctx.beginPath();
-            ctx.moveTo(p[0],p[1]); ctx.lineTo(p[2],p[3]);
-            ctx.lineTo(p[4],p[5]); ctx.lineTo(p[6],p[7]);
-            ctx.closePath();
-            ctx.strokeStyle="yellow";
-            ctx.stroke();
-
-            // corner index labels 0..3 (TL,TR,BR,BL in marker frame)
-            ctx.fillStyle="yellow";
-            ctx.font="12px monospace";
-            for(let k=0;k<4;k++){
-              ctx.fillText(String(k), p[k*2]+4, p[k*2+1]-4);
-            }
-
-            // marker ID label at center (shown for all IDs)
-            const mid = idsArr ? idsArr[i] : "?";
-            ctx.fillStyle="#00ffff";
-            ctx.font="bold 20px monospace";
-            ctx.textAlign="center";
-            ctx.fillText("ID:"+mid, cxp, cyp);
-            ctx.textAlign="start";
-          }finally{ mat.delete(); }
-        }
-
-        const idxLaser = findMarkerIndexById(det.ids, settings.laserId);
-        const idxWall  = findMarkerIndexById(det.ids, settings.wallId);
-        const idxCubeA = findMarkerIndexById(det.ids, settings.cubeIdA);
-        const idxCubeB = findMarkerIndexById(det.ids, settings.cubeIdB);
-
-        const laserOrdered = getOrderedCornersFromMatVector(det.corners, idxLaser);
-        const wallOrdered  = getOrderedCornersFromMatVector(det.corners, idxWall);
-        const cubeAOrdered = getOrderedCornersFromMatVector(det.corners, idxCubeA);
-        const cubeBOrdered = getOrderedCornersFromMatVector(det.corners, idxCubeB);
-
-        let laserPose=null;
-        let usedMode = "single"; // for debug
-        if(settings.cubeMode && cubeAOrdered && cubeBOrdered){
-          // 2-face joint solvePnP (8 points)
-          laserPose = estimateCubePoseFromTwoCorners(cubeAOrdered, cubeBOrdered, cv2);
-          laserPose = applyReprojGate(laserPose, lastGoodCube[active.key]);
-          if(laserPose) lastGoodCube[active.key]=laserPose;
-          usedMode = "cube(8pt)";
-        } else if(settings.cubeMode && (cubeAOrdered || cubeBOrdered)){
-          // Fallback: only one face visible -> single-marker pose on whichever is present
-          // (laser direction will use marker +Z, less ideal than the bisector, but better than nothing)
-          const fallback = cubeAOrdered || cubeBOrdered;
-          laserPose = estimatePoseFromCornersOrdered(fallback, cv2, active.pnp);
-          laserPose = applyReprojGate(laserPose, lastGoodLaser[active.key]);
-          if(laserPose) lastGoodLaser[active.key]=laserPose;
-          usedMode = "single-fallback(1face)";
-        } else if(laserOrdered){
-          // Classical single-marker mode
-          laserPose = estimatePoseFromCornersOrdered(laserOrdered, cv2, active.pnp);
-          laserPose = applyReprojGate(laserPose, lastGoodLaser[active.key]);
-          if(laserPose) lastGoodLaser[active.key]=laserPose;
-        }
-
-        let wallPose=null;
-        if(settings.useWallMarker){
-          if(wallOrdered){
-            wallPose = estimatePoseFromCornersOrdered(wallOrdered, cv2, active.pnp);
-            wallPose = applyReprojGate(wallPose, lastGoodWall[active.key]);
-            if(wallPose) lastGoodWall[active.key]=wallPose;
-          }else{
-            wallPose = settings.holdWallPose ? (lastGoodWall[active.key]||null) : null;
-          }
-        }
-
-        const hit = computeHitPoint(laserPose, wallPose);
-
-        // Screen aim (Z=0 plane in camera frame)
-        let screenHit = null;
-        if(settings.screenMode && laserPose){
-          const ray = getLaserRay(laserPose);
-          screenHit = computeScreenHit(ray);
-        }
-
-        // Temporal smoothing (One Euro) on the hit point to kill jitter
-        if(screenHit && settings.smoothOn){
-          const ts=performance.now()/1000.0;
-          const su=euroU.filter(screenHit.u, ts);
-          const sv=euroV.filter(screenHit.v, ts);
-          const W=settings.screenW, H=settings.screenH;
-          const hx=su*W - W*0.5;
-          const hy=sv*H + settings.camYOffset;
-          screenHit.u=su; screenHit.v=sv;
-          screenHit.hitCam=[hx,hy,0];
-          screenHit.inside=(su>=0 && su<=1 && sv>=0 && sv<=1);
-        } else if(!screenHit){
-          // lost tracking -> reset filters so re-acquire doesn't lag
-          euroU.reset(); euroV.reset();
-        }
-
-        lastScreenHit = screenHit;
-        drawScreenView(screenHit);
-        drawFullscreenTarget(screenHit);
-
-        if(laserPose){
-          // Draw axes
-          if(laserPose.isCube){
-            // For cube pose, axes correspond to cube +X, +Y, +Z; draw them and the 45° bisector
-            const cs = settings.cubeSize * 0.5;
-            const cubeAxisLen = settings.cubeSize;
-            // Project origin (shared edge midpoint) and 4 vectors: +X, +Y, +Z, bisector
-            const axes3d = cv2.matFromArray(5, 3, cv2.CV_64F, [
-              cs, cs, 0,                         // origin (shared edge midpoint)
-              cs + cubeAxisLen, cs, 0,           // +X arm
-              cs, cs + cubeAxisLen, 0,           // +Y arm
-              cs, cs, cubeAxisLen,               // +Z arm
-              cs + cubeAxisLen/Math.SQRT2, cs + cubeAxisLen/Math.SQRT2, 0, // bisector (45°)
-            ]);
-            tmpRvec.data64F[0]=laserPose.rvec[0];
-            tmpRvec.data64F[1]=laserPose.rvec[1];
-            tmpRvec.data64F[2]=laserPose.rvec[2];
-            tmpTvec.data64F[0]=laserPose.tvec[0];
-            tmpTvec.data64F[1]=laserPose.tvec[1];
-            tmpTvec.data64F[2]=laserPose.tvec[2];
-            const out = new cv2.Mat();
-            cv2.projectPoints(axes3d, tmpRvec, tmpTvec, cameraMatrix, distCoeffs, out);
-            const p = out.data64F;
-            ctx.lineWidth=3;
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[2],p[3]); ctx.strokeStyle="red";   ctx.stroke(); // +X
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[4],p[5]); ctx.strokeStyle="lime";  ctx.stroke(); // +Y
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[6],p[7]); ctx.strokeStyle="cyan";  ctx.stroke(); // +Z
-            ctx.lineWidth=5;
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[8],p[9]); ctx.strokeStyle="magenta"; ctx.stroke(); // bisector (laser)
-            out.delete();
-            axes3d.delete();
-          } else {
-            axisObjPoints.data64F[3]=markerLength;
-            axisObjPoints.data64F[7]=markerLength;
-            axisObjPoints.data64F[11]=markerLength;
-
-            tmpRvec.data64F[0]=laserPose.rvec[0];
-            tmpRvec.data64F[1]=laserPose.rvec[1];
-            tmpRvec.data64F[2]=laserPose.rvec[2];
-            tmpTvec.data64F[0]=laserPose.tvec[0];
-            tmpTvec.data64F[1]=laserPose.tvec[1];
-            tmpTvec.data64F[2]=laserPose.tvec[2];
-
-            cv2.projectPoints(axisObjPoints, tmpRvec, tmpTvec, cameraMatrix, distCoeffs, axisImgPoints);
-            const p=axisImgPoints.data64F;
-
-            ctx.lineWidth=3;
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[2],p[3]); ctx.strokeStyle="red"; ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[4],p[5]); ctx.strokeStyle="lime"; ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(p[6],p[7]); ctx.strokeStyle="cyan"; ctx.stroke();
-          }
-        }
-
-        drawHumanOverlay2D();
-
-        let msg = `MODE: ${active.label} (det=${tag}, pnp=${active.pnp})\n`;
-        msg += `Dict=${settings.dictKey} API=${arucoUseLegacy?"legacy":"modern"}\n`;
-        msg += `PoseMode: ${settings.cubeMode ? usedMode : "single"} (cubeMode=${settings.cubeMode})\n`;
-        msg += `FPS(main): ${fpsValue.toFixed(1)} / FPS(human): ${humanFpsValue.toFixed(1)}\n`;
-        msg += `Detect=${count} laserIdx=${idxLaser} wallIdx=${idxWall} cubeA=${idxCubeA} cubeB=${idxCubeB}\n`;
-        msg += `grayMean=${grayMean.toFixed(1)} (0付近=真っ黒/入力なし)\n`;
-        msg += `Cam=${canvas.width}x${canvas.height} video=${video.videoWidth}x${video.videoHeight}\n`;
-        if(laserPose){
-          msg += `Laser t=[${laserPose.tvec.map(x=>x.toFixed(3)).join(",")}]\n`;
-          msg += `Laser r=[${laserPose.rvec.map(x=>x.toFixed(3)).join(",")}]\n`;
-          msg += `reproj=${laserPose.reprojErr.toFixed(2)}px\n`;
-        }
-        if(settings.screenMode){
-          if(screenHit){
-            msg += `Screen: u=${screenHit.u.toFixed(3)} v=${screenHit.v.toFixed(3)} ` +
-                   `${screenHit.inside?"IN":"OUT"} dist=${screenHit.distance.toFixed(2)}m\n`;
-          } else if(laserPose){
-            msg += `Screen: no intersection (ray points away or parallel)\n`;
-          }
-        }
+    let video = null;
+    let canvas = null;
+    let ctx = null;
+
+    let canvas3d = null;
+    let ctx3d = null;
+
+    let debugDiv = null;
+    let statusDiv = null;
+    let markerLengthInput = null;
+    let wallSizeInput = null;
+    let smoothInput = null;
+    let smoothLabel = null;
+
+    let arucoDetector = null;
+    let markerCorners = null;
+    let markerIds = null;
+    let rejectedCandidates = null;
+
+    // pose 推定用
+    let cameraMatrix = null;
+    let distCoeffs = null;
+    let markerLength = 0.10; // [m]
+    let wallHalf = 0.5;      // 壁一辺の半分 [m]（初期値 0.5 → 一辺1m）
+
+    // 平滑化用
+    // smoothAlpha: 新しい値の寄与率（1=平滑化なし, 小さいほど強く平均）
+    let smoothAlpha = 0.525; // slider=50 のときの初期値
+    let smoothedPose = null; // {t:[3], R:[9], dist}
+
+    let animationId = null;
+
+    function logDebug(msg) {
+      console.log(msg);
+      if (debugDiv) {
         debugDiv.textContent = msg;
-
-        draw3DView(active, laserPose, wallPose, hit, screenHit);
-
-        det.corners.delete();
-        det.ids.delete();
-
-      }catch(e){
-        console.error(e);
-        debugDiv.textContent = "tick exception: " + e;
       }
     }
 
-    function draw3DView(active, laserPose, wallPose, hit, screenHit){
-      const w=canvas3d.width, h=canvas3d.height;
-      const cx=w/2, cy=h/2;
+    async function onOpenCvLoaded() {
+      statusDiv = document.getElementById('status');
+      debugDiv  = document.getElementById('debug');
+      markerLengthInput = document.getElementById('markerLengthInput');
+      wallSizeInput = document.getElementById('wallSizeInput');
+      smoothInput = document.getElementById('smoothInput');
+      smoothLabel = document.getElementById('smoothLabel');
 
-      ctx3d.clearRect(0,0,w,h);
-      ctx3d.fillStyle="#000"; ctx3d.fillRect(0,0,w,h);
-
-      const scale=w*0.5;
-      const yaw=45*Math.PI/180;
-      const pitch=-45*Math.PI/180;
-
-      function worldToView(p){
-        let x=p[0], y=p[1], z=p[2];
-        let x1=Math.cos(yaw)*x + Math.sin(yaw)*z;
-        let z1=-Math.sin(yaw)*x + Math.cos(yaw)*z;
-        let y2=Math.cos(pitch)*y - Math.sin(pitch)*z1;
-        return [cx - x1*scale, cy + y2*scale];
-      }
-
-      // Screen rectangle (Z=0 plane) - camera at origin, top edge at Y=camYOffset
-      if(settings.screenMode){
-        const W=settings.screenW, H=settings.screenH, y0=settings.camYOffset;
-        const sr=[[-W/2,y0,0],[W/2,y0,0],[W/2,y0+H,0],[-W/2,y0+H,0]];
-        ctx3d.strokeStyle="#0aa";
-        ctx3d.lineWidth=1.5;
-        ctx3d.beginPath();
-        let pp=worldToView(sr[0]); ctx3d.moveTo(pp[0],pp[1]);
-        for(let i=1;i<4;i++){ const p=worldToView(sr[i]); ctx3d.lineTo(p[0],p[1]); }
-        ctx3d.closePath(); ctx3d.stroke();
-
-        // Camera dot at origin
-        const cam=worldToView([0,0,0]);
-        ctx3d.fillStyle="#0ff";
-        ctx3d.beginPath(); ctx3d.arc(cam[0],cam[1],4,0,Math.PI*2); ctx3d.fill();
-      } else {
-        // Original wall (for non-screen mode)
-        const wall=[[-wallHalf,wallHalf,0],[wallHalf,wallHalf,0],[wallHalf,-wallHalf,0],[-wallHalf,-wallHalf,0]];
-        ctx3d.strokeStyle="#444";
-        ctx3d.beginPath();
-        let p0=worldToView(wall[0]); ctx3d.moveTo(p0[0],p0[1]);
-        for(let i=1;i<4;i++){ let p=worldToView(wall[i]); ctx3d.lineTo(p[0],p[1]); }
-        ctx3d.closePath(); ctx3d.stroke();
-      }
-
-      if(!laserPose) return;
-
-      // Use the laser ray (origin + direction) - this picks the bisector in cube mode
-      const ray = getLaserRay(laserPose);
-      if(!ray){ return; }
-
-      // Draw cube wireframe (only when in cube mode and we got a cube pose)
-      if(laserPose.isCube){
-        const cs = settings.cubeSize * 0.5;
-        const cubeV = [
-          [-cs,-cs,-cs],[ cs,-cs,-cs],[ cs, cs,-cs],[-cs, cs,-cs],
-          [-cs,-cs, cs],[ cs,-cs, cs],[ cs, cs, cs],[-cs, cs, cs],
-        ];
-        const cubeCam = cubeV.map(v=>cubeToCamera(laserPose, v, false));
-        const edges = [
-          [0,1],[1,2],[2,3],[3,0],
-          [4,5],[5,6],[6,7],[7,4],
-          [0,4],[1,5],[2,6],[3,7],
-        ];
-        ctx3d.strokeStyle="#888";
-        ctx3d.lineWidth=1;
-        for(const [a,b] of edges){
-          const pa=worldToView(cubeCam[a]);
-          const pb=worldToView(cubeCam[b]);
-          ctx3d.beginPath(); ctx3d.moveTo(pa[0],pa[1]); ctx3d.lineTo(pb[0],pb[1]); ctx3d.stroke();
-        }
-        function fillFace(idxs, style){
-          ctx3d.fillStyle=style;
-          ctx3d.beginPath();
-          for(let i=0;i<idxs.length;i++){
-            const p=worldToView(cubeCam[idxs[i]]);
-            if(i===0) ctx3d.moveTo(p[0],p[1]); else ctx3d.lineTo(p[0],p[1]);
+      // マーカー一辺 [m]
+      if (markerLengthInput) {
+        markerLengthInput.addEventListener('change', () => {
+          const v = parseFloat(markerLengthInput.value);
+          if (!isNaN(v) && v > 0) {
+            markerLength = v;
+            console.log('markerLength set to', markerLength, 'm');
           }
-          ctx3d.closePath(); ctx3d.fill();
+        });
+      }
+
+      // 壁サイズ [m]（一辺）
+      if (wallSizeInput) {
+        wallSizeInput.addEventListener('change', () => {
+          const v = parseFloat(wallSizeInput.value);
+          if (!isNaN(v) && v > 0) {
+            wallHalf = v / 2.0;
+            console.log('wall size set to', v, 'm (half=', wallHalf, 'm)');
+          }
+        });
+      }
+
+      // 平滑度スライダー（0〜100）
+      if (smoothInput && smoothLabel) {
+        const updateSmooth = () => {
+          const v = parseInt(smoothInput.value, 10) || 0;
+          smoothLabel.textContent = v;
+          const s = Math.min(Math.max(v / 100.0, 0.0), 1.0);
+          const minAlpha = 0.05; // 最大平滑時でも少しは新しい値を入れる
+          // s=0 → alpha=1.0 (平滑なし)
+          // s=1 → alpha=minAlpha (最強平滑)
+          smoothAlpha = (1.0 - s) * 1.0 + s * minAlpha;
+          console.log('smooth slider=', v, 'smoothAlpha=', smoothAlpha.toFixed(3));
+        };
+        smoothInput.addEventListener('input', updateSmooth);
+        updateSmooth();
+      }
+
+      statusDiv.textContent = 'OpenCV.js 読み込み中…';
+
+      try {
+        CV = await cv;
+        statusDiv.textContent = 'OpenCV.js 初期化完了。カメラにアクセスします…';
+        initAll();
+      } catch (e) {
+        statusDiv.textContent = 'OpenCV.js の初期化に失敗しました: ' + e;
+        console.error(e);
+      }
+    }
+
+    async function initAll() {
+      video    = document.getElementById('video');
+      canvas   = document.getElementById('canvas');
+      canvas3d = document.getElementById('canvas3d');
+
+      ctx   = canvas.getContext('2d', { willReadFrequently: true });
+      ctx3d = canvas3d.getContext('2d');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        });
+        video.srcObject = stream;
+        video.muted = true;
+
+        video.play().catch(err => {
+          logDebug('video.play() に失敗しました。ビデオをクリックして再生して下さい。\n' + err);
+        });
+
+        video.addEventListener('loadedmetadata', () => {
+          canvas.width  = video.videoWidth;
+          canvas.height = video.videoHeight;
+
+          const size3d = Math.min(video.videoWidth, video.videoHeight);
+          canvas3d.width  = size3d;
+          canvas3d.height = size3d;
+
+          statusDiv.textContent = 'カメラ準備完了。ArUco 検出器を初期化中…';
+          setupAruco();
+          statusDiv.textContent = '準備完了。DICT_4X4_50 マーカーをカメラに映してください。';
+          tick();
+        });
+      } catch (err) {
+        statusDiv.textContent = 'カメラの取得に失敗しました: ' + err.name;
+        logDebug('getUserMedia エラー:\n' + err.name + ': ' + err.message);
+      }
+    }
+
+    function setupAruco() {
+      const cv2 = CV;
+
+      const dict         = cv2.getPredefinedDictionary(cv2.DICT_4X4_50);
+      const detectParams = new cv2.aruco_DetectorParameters();
+      const refineParams = new cv2.aruco_RefineParameters(10, 3, true);
+      arucoDetector      = new cv2.aruco_ArucoDetector(dict, detectParams, refineParams);
+
+      markerCorners      = new cv2.MatVector();
+      markerIds          = new cv2.Mat();
+      rejectedCandidates = new cv2.MatVector();
+
+      const w = canvas.width;
+      const h = canvas.height;
+      const fovDeg = 60.0;
+      const fovRad = fovDeg * Math.PI / 180.0;
+      const fx = w / (2.0 * Math.tan(fovRad / 2.0));
+      const fy = fx;
+      const cx = w / 2.0;
+      const cy = h / 2.0;
+
+      cameraMatrix = cv2.matFromArray(3, 3, cv2.CV_64F, [
+        fx, 0,  cx,
+        0,  fy, cy,
+        0,  0,  1
+      ]);
+      distCoeffs = cv2.Mat.zeros(1, 5, cv2.CV_64F);
+
+      let msg =
+        'ArucoDetector 準備完了 (DICT_4X4_50)。\n' +
+        '簡易カメラ行列:\n' +
+        `fx=${fx.toFixed(1)}, fy=${fy.toFixed(1)}, cx=${cx.toFixed(1)}, cy=${cy.toFixed(1)}\n` +
+        `markerLength=${markerLength.toFixed(3)} m`;
+      if (!cv2.solvePnP) {
+        msg += '\n⚠ solvePnP が使えないため 3D ポーズは静止します。';
+      }
+      logDebug(msg);
+    }
+
+    function tick() {
+      animationId = requestAnimationFrame(tick);
+      if (!arucoDetector || video.readyState !== HTMLMediaElement.HAVE_ENOUGH_DATA) {
+        return;
+      }
+
+      const cv2 = CV;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      let src  = cv2.imread(canvas);
+      let gray = new cv2.Mat();
+      cv2.cvtColor(src, gray, cv2.COLOR_RGBA2GRAY);
+
+      markerCorners.delete();
+      rejectedCandidates.delete();
+      markerIds.delete();
+      markerCorners      = new cv2.MatVector();
+      rejectedCandidates = new cv2.MatVector();
+      markerIds          = new cv2.Mat();
+
+      try {
+        arucoDetector.detectMarkers(gray, markerCorners, markerIds, rejectedCandidates);
+      } catch (e) {
+        logDebug('detectMarkers でエラーが発生しました:\n' + e);
+        src.delete();
+        gray.delete();
+        return;
+      }
+
+      const ids   = markerIds.data32S;
+      const count = markerCorners.size();
+
+      let rawPose = null;
+
+      if (count > 0 && cameraMatrix && distCoeffs && CV.solvePnP) {
+        const mat = markerCorners.get(0);
+        const pts = mat.data32F;
+
+        const half = markerLength / 2.0;
+
+        const objPointsArr = [
+          -half, -half, 0,
+           half, -half, 0,
+           half,  half, 0,
+          -half,  half, 0
+        ];
+
+        const imgPointsArr = [
+          pts[0], pts[1],
+          pts[2], pts[3],
+          pts[4], pts[5],
+          pts[6], pts[7]
+        ];
+
+        const objPoints = CV.matFromArray(4, 3, CV.CV_64F, objPointsArr);
+        const imgPoints = CV.matFromArray(4, 2, CV.CV_64F, imgPointsArr);
+
+        const rvec = new CV.Mat(3, 1, CV.CV_64F);
+        const tvec = new CV.Mat(3, 1, CV.CV_64F);
+
+        try {
+          const success = CV.solvePnP(
+            objPoints, imgPoints, cameraMatrix, distCoeffs,
+            rvec, tvec, false
+          );
+
+          const rArr = rvec.data64F && rvec.data64F.length >= 3 ? rvec.data64F : rvec.data32F;
+          const tArr = tvec.data64F && tvec.data64F.length >= 3 ? tvec.data64F : tvec.data32F;
+
+          if (rArr && tArr && rArr.length >= 3 && tArr.length >= 3 && success !== false) {
+            const rx = rArr[0], ry = rArr[1], rz = rArr[2];
+            const tx = tArr[0], ty = tArr[1], tz = tArr[2];
+
+            const rvecMat = CV.matFromArray(3, 1, CV.CV_64F, [rx, ry, rz]);
+            const Rmat    = new CV.Mat();
+            CV.Rodrigues(rvecMat, Rmat);
+
+            const rawR = (Rmat.data64F && Rmat.data64F.length === 9)
+              ? Array.from(Rmat.data64F)
+              : Array.from(Rmat.data32F);
+
+            const dist = Math.hypot(tx, ty, tz);
+
+            rawPose = {
+              t: [tx, ty, tz],
+              R: rawR,
+              dist: dist
+            };
+
+            rvecMat.delete();
+            Rmat.delete();
+          }
+        } catch (e) {
+          console.warn('solvePnP / Rodrigues でエラー:', e);
+        } finally {
+          objPoints.delete();
+          imgPoints.delete();
+          rvec.delete();
+          tvec.delete();
         }
-        fillFace([1,2,6,5], "rgba(255,80,80,0.15)");  // +X face
-        fillFace([2,3,7,6], "rgba(80,255,80,0.15)");  // +Y face
       }
 
-      // Laser ray
-      const o = ray.origin;
-      const d = ray.direction;
-      let end;
-      if(settings.screenMode && screenHit){
-        end = screenHit.hitCam;
-      } else if(hit && hit.point){
-        end = hit.point;
+      // ==== 平滑化 ====
+      updateSmoothedPose(rawPose);
+      const poseToUse = smoothedPose || rawPose;
+
+      // デバッグ
+      let info = `検出マーカー数: ${count}`;
+      if (ids && ids.length) {
+        info += '\nIDs: ' + Array.from(ids).join(', ');
+      }
+      if (poseToUse) {
+        const tx = poseToUse.t[0], ty = poseToUse.t[1], tz = poseToUse.t[2];
+        info += `\nPose(smooth): OK\nMarker in camera coords (m):\n` +
+                `  tx=${tx.toFixed(3)}, ty=${ty.toFixed(3)}, tz=${tz.toFixed(3)}\n` +
+                `  dist=${poseToUse.dist.toFixed(3)} m` +
+                `\n  (markerLength=${markerLength.toFixed(3)} m)` +
+                `\n  smoothAlpha=${smoothAlpha.toFixed(3)}`;
       } else {
-        end = add(o, mul(d, 2.0));
+        info += '\nPose: (not available)';
+      }
+      debugDiv.textContent = info;
+
+      // 左側 2D 描画
+      ctx.lineWidth   = 3;
+      ctx.strokeStyle = 'red';
+      ctx.fillStyle   = 'yellow';
+      ctx.font        = '14px monospace';
+
+      for (let i = 0; i < count; i++) {
+        const id   = ids[i];
+        const mat  = markerCorners.get(i);
+        const pts  = mat.data32F;
+
+        const x0 = pts[0], y0 = pts[1];
+        const x1 = pts[2], y1 = pts[3];
+        const x2 = pts[4], y2 = pts[5];
+        const x3 = pts[6], y3 = pts[7];
+
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.lineTo(x3, y3);
+        ctx.closePath();
+        ctx.strokeStyle = 'red';
+        ctx.stroke();
+
+        const cx2d = (x0 + x1 + x2 + x3) / 4.0;
+        const cy2d = (y0 + y1 + y2 + y3) / 4.0;
+
+        const edgeMx = (x0 + x1) / 2.0;
+        const edgeMy = (y0 + y1) / 2.0;
+        const vx     = edgeMx - cx2d;
+        const vy     = edgeMy - cy2d;
+        const len    = Math.hypot(vx, vy) || 1.0;
+
+        const scaleArrow  = 2.0;
+        const ax     = cx2d + (vx / len) * 40 * scaleArrow;
+        const ay     = cy2d + (vy / len) * 40 * scaleArrow;
+
+        ctx.beginPath();
+        ctx.moveTo(cx2d, cy2d);
+        ctx.lineTo(ax, ay);
+        ctx.strokeStyle = 'lime';
+        ctx.stroke();
+
+        const angleDeg = Math.round(Math.atan2(vy, vx) * 180 / Math.PI);
+
+        ctx.fillStyle = 'yellow';
+        ctx.fillText(`ID:${id} θ:${angleDeg}°`, cx2d + 5, cy2d - 5);
       }
 
-      const c2=worldToView(o);
-      const e2=worldToView(end);
+      // 右側 3D 描画
+      draw3DView(poseToUse);
 
-      ctx3d.strokeStyle = laserPose.isCube ? "magenta" : active.color;
-      ctx3d.lineWidth = laserPose.isCube ? 3 : 2;
-      ctx3d.beginPath(); ctx3d.moveTo(c2[0],c2[1]); ctx3d.lineTo(e2[0],e2[1]); ctx3d.stroke();
+      src.delete();
+      gray.delete();
+    }
 
-      // Screen hit marker
-      if(settings.screenMode && screenHit){
-        const hp=worldToView(screenHit.hitCam);
-        ctx3d.fillStyle = screenHit.inside ? "#0f0" : "#f80";
-        ctx3d.beginPath(); ctx3d.arc(hp[0],hp[1],5,0,Math.PI*2); ctx3d.fill();
+    // 平滑化更新
+    function updateSmoothedPose(currentPose) {
+      if (!currentPose) {
+        smoothedPose = null;
+        return;
+      }
+
+      const alpha = smoothAlpha;
+
+      // 平滑なしに近い場合 or 初回
+      if (!smoothedPose || alpha >= 0.999) {
+        smoothedPose = {
+          t: currentPose.t.slice(),
+          R: currentPose.R.slice(),
+          dist: currentPose.dist
+        };
+        return;
+      }
+
+      const inv = 1.0 - alpha;
+
+      const tPrev = smoothedPose.t;
+      const tCurr = currentPose.t;
+      const tNew = [
+        tPrev[0] * inv + tCurr[0] * alpha,
+        tPrev[1] * inv + tCurr[1] * alpha,
+        tPrev[2] * inv + tCurr[2] * alpha
+      ];
+
+      const RPrev = smoothedPose.R;
+      const RCurr = currentPose.R;
+      const RNew = new Array(9);
+      for (let i = 0; i < 9; i++) {
+        RNew[i] = RPrev[i] * inv + RCurr[i] * alpha;
+      }
+
+      const distNew = Math.hypot(tNew[0], tNew[1], tNew[2]);
+
+      smoothedPose = {
+        t: tNew,
+        R: RNew,
+        dist: distNew
+      };
+    }
+
+    // 3D ビュー描画
+    function draw3DView(poseInfo) {
+      const w = canvas3d.width;
+      const h = canvas3d.height;
+      const cx = w / 2;
+      const cy = h / 2;
+
+      ctx3d.clearRect(0, 0, w, h);
+      ctx3d.fillStyle = '#000';
+      ctx3d.fillRect(0, 0, w, h);
+
+      const scale = w * 0.5;
+
+      const yaw   = 45 * Math.PI / 180.0;
+      const pitch = -30 * Math.PI / 180.0;
+
+      function worldToView(p) {
+        let x = p[0];
+        let y = p[1];
+        let z = p[2];
+
+        let x1 =  Math.cos(yaw) * x + Math.sin(yaw) * z;
+        let z1 = -Math.sin(yaw) * x + Math.cos(yaw) * z;
+        let y1 = y;
+
+        let y2 =  Math.cos(pitch) * y1 - Math.sin(pitch) * z1;
+        let z2 =  Math.sin(pitch) * y1 + Math.cos(pitch) * z1;
+        let x2 = x1;
+
+        // 左右は現実と一致させるため X にマイナス、上下はそのまま
+        return [
+          cx - x2 * scale,
+          cy + y2 * scale
+        ];
+      }
+
+      // カメラ原点
+      const camOrigin = [0, 0, 0];
+      const cam2d = worldToView(camOrigin);
+      ctx3d.fillStyle = '#ff8800';
+      ctx3d.beginPath();
+      ctx3d.arc(cam2d[0], cam2d[1], 4, 0, Math.PI * 2);
+      ctx3d.fill();
+      ctx3d.fillStyle = '#ff8800';
+      ctx3d.font = '12px monospace';
+      ctx3d.fillText('Camera (origin)', cam2d[0] + 6, cam2d[1] - 6);
+
+      // 壁 = z=0 平面（壁サイズは wallHalf から）
+      const wallCorners = [
+        [-wallHalf, -wallHalf, 0],
+        [ wallHalf, -wallHalf, 0],
+        [ wallHalf,  wallHalf, 0],
+        [-wallHalf,  wallHalf, 0]
+      ];
+      ctx3d.strokeStyle = '#5555ff';
+      ctx3d.lineWidth = 2;
+      ctx3d.beginPath();
+      let w0 = worldToView(wallCorners[0]);
+      ctx3d.moveTo(w0[0], w0[1]);
+      for (let i = 1; i < wallCorners.length; i++) {
+        const p = worldToView(wallCorners[i]);
+        ctx3d.lineTo(p[0], p[1]);
+      }
+      ctx3d.closePath();
+      ctx3d.stroke();
+      ctx3d.fillStyle = '#aaaaff';
+      ctx3d.font = '12px monospace';
+      ctx3d.fillText(`Wall (z=0, size=${(wallHalf*2).toFixed(2)}m)`, w0[0] + 5, w0[1] - 5);
+
+      // XYZ 軸
+      const axisLen = 0.2;
+      const axisX = worldToView([axisLen, 0, 0]);
+      const axisY = worldToView([0, axisLen, 0]);
+      const axisZ = worldToView([0, 0, axisLen]);
+
+      ctx3d.strokeStyle = '#ff4444';
+      ctx3d.beginPath();
+      ctx3d.moveTo(cam2d[0], cam2d[1]);
+      ctx3d.lineTo(axisX[0], axisX[1]);
+      ctx3d.stroke();
+      ctx3d.fillStyle = '#ff4444';
+      ctx3d.fillText('X', axisX[0] + 4, axisX[1]);
+
+      ctx3d.strokeStyle = '#44ff44';
+      ctx3d.beginPath();
+      ctx3d.moveTo(cam2d[0], cam2d[1]);
+      ctx3d.lineTo(axisY[0], axisY[1]);
+      ctx3d.stroke();
+      ctx3d.fillStyle = '#44ff44';
+      ctx3d.fillText('Y', axisY[0] + 4, axisY[1]);
+
+      ctx3d.strokeStyle = '#4488ff';
+      ctx3d.beginPath();
+      ctx3d.moveTo(cam2d[0], cam2d[1]);
+      ctx3d.lineTo(axisZ[0], axisZ[1]);
+      ctx3d.stroke();
+      ctx3d.fillStyle = '#4488ff';
+      ctx3d.fillText('Z', axisZ[0] + 4, axisZ[1]);
+
+      if (!poseInfo) {
+        ctx3d.fillStyle = '#ffffff';
+        ctx3d.font = '14px monospace';
+        ctx3d.fillText('No marker / pose', 10, 20);
+        return;
+      }
+
+      const t = poseInfo.t;
+      const R = poseInfo.R;
+      const half = markerLength / 2.0;
+
+      function transformMarkerLocal(px, py, pz) {
+        const x = R[0] * px + R[1] * py + R[2] * pz + t[0];
+        const y = R[3] * px + R[4] * py + R[5] * pz + t[1];
+        const z = R[6] * px + R[7] * py + R[8] * pz + t[2];
+        return [x, y, z];
+      }
+
+      const markerLocalCorners = [
+        [-half, -half, 0],
+        [ half, -half, 0],
+        [ half,  half, 0],
+        [-half,  half, 0]
+      ];
+      const markerWorldCorners = markerLocalCorners.map(p => transformMarkerLocal(p[0], p[1], p[2]));
+
+      ctx3d.strokeStyle = '#8888ff';
+      ctx3d.lineWidth = 2;
+      ctx3d.beginPath();
+      let p0 = worldToView(markerWorldCorners[0]);
+      ctx3d.moveTo(p0[0], p0[1]);
+      for (let i = 1; i < markerWorldCorners.length; i++) {
+        const p = worldToView(markerWorldCorners[i]);
+        ctx3d.lineTo(p[0], p[1]);
+      }
+      ctx3d.closePath();
+      ctx3d.stroke();
+
+      const markerCenter2d = worldToView(t);
+      ctx3d.fillStyle = '#ffffff';
+      ctx3d.beginPath();
+      ctx3d.arc(markerCenter2d[0], markerCenter2d[1], 3, 0, Math.PI * 2);
+      ctx3d.fill();
+      ctx3d.fillStyle = '#ffffff';
+      ctx3d.font = '12px monospace';
+      ctx3d.fillText(
+        `Marker center\n(dist=${poseInfo.dist.toFixed(3)} m)`,
+        markerCenter2d[0] + 6,
+        markerCenter2d[1] - 6
+      );
+
+      const normalLocal = [0, 0, markerLength * 0.8];
+      const normalWorldStart = transformMarkerLocal(0, 0, 0);
+      const normalWorldEnd   = transformMarkerLocal(
+        normalLocal[0], normalLocal[1], normalLocal[2]
+      );
+
+      const nDir = [
+        normalWorldEnd[0] - normalWorldStart[0],
+        normalWorldEnd[1] - normalWorldStart[1],
+        normalWorldEnd[2] - normalWorldStart[2]
+      ];
+      const nLen = Math.hypot(nDir[0], nDir[1], nDir[2]) || 1.0;
+      const n = [nDir[0] / nLen, nDir[1] / nLen, nDir[2] / nLen];
+
+      const n0 = worldToView(normalWorldStart);
+      const n1 = worldToView([
+        normalWorldStart[0] + n[0] * markerLength * 0.8,
+        normalWorldStart[1] + n[1] * markerLength * 0.8,
+        normalWorldStart[2] + n[2] * markerLength * 0.8
+      ]);
+      ctx3d.strokeStyle = '#00ff00';
+      ctx3d.lineWidth = 3;
+      ctx3d.beginPath();
+      ctx3d.moveTo(n0[0], n0[1]);
+      ctx3d.lineTo(n1[0], n1[1]);
+      ctx3d.stroke();
+      ctx3d.fillStyle = '#00ff00';
+      ctx3d.font = '12px monospace';
+      ctx3d.fillText('Marker normal', n1[0] + 5, n1[1]);
+
+      let hitPoint = null;
+      let s = null;
+      if (Math.abs(n[2]) > 1e-6) {
+        s = -normalWorldStart[2] / n[2];
+        hitPoint = [
+          normalWorldStart[0] + s * n[0],
+          normalWorldStart[1] + s * n[1],
+          0
+        ];
+      }
+
+      if (hitPoint) {
+        const hit2d = worldToView(hitPoint);
+        const color = (s >= 0) ? '#00ff00' : '#ff4444';
+
+        ctx3d.fillStyle = color;
+        ctx3d.beginPath();
+        ctx3d.arc(hit2d[0], hit2d[1], 4, 0, Math.PI * 2);
+        ctx3d.fill();
+        ctx3d.font = '12px monospace';
+        ctx3d.fillText(
+          `Normal hit (${s >= 0 ? '+N side' : '-N side'})`,
+          hit2d[0] + 6,
+          hit2d[1] - 6
+        );
+
+        ctx3d.strokeStyle = color;
+        ctx3d.lineWidth = 1.5;
+        ctx3d.beginPath();
+        ctx3d.moveTo(markerCenter2d[0], markerCenter2d[1]);
+        ctx3d.lineTo(hit2d[0], hit2d[1]);
+        ctx3d.stroke();
       }
     }
 
-    window.addEventListener("beforeunload",()=>{
-      if(mainLoopId) cancelAnimationFrame(mainLoopId);
-      if(previewLoopId) cancelAnimationFrame(previewLoopId);
-      try{
-        detectorSubpix?.delete?.();
-        detectorApriltag?.delete?.();
-        cap?.delete?.();
-        frameRGBA?.delete?.();
-        frameGray?.delete?.();
-        cameraMatrix?.delete?.();
-        distCoeffs?.delete?.();
-        axisObjPoints?.delete?.();
-        axisImgPoints?.delete?.();
-        pnpObj?.delete?.(); pnpImg?.delete?.(); pnpRvec?.delete?.(); pnpTvec?.delete?.(); pnpRmat?.delete?.(); pnpProj?.delete?.();
-        cubeObj?.delete?.(); cubeImg?.delete?.(); cubeProj?.delete?.();
-        calibObjVec?.delete?.(); calibImgVec?.delete?.(); calibLastCorners?.delete?.();
-        tmpRvec?.delete?.(); tmpTvec?.delete?.();
-      }catch(e){}
+    window.addEventListener('beforeunload', () => {
+      if (animationId) cancelAnimationFrame(animationId);
+      try {
+        if (markerCorners)      markerCorners.delete();
+        if (markerIds)          markerIds.delete();
+        if (rejectedCandidates) rejectedCandidates.delete();
+        if (cameraMatrix)       cameraMatrix.delete();
+        if (distCoeffs)         distCoeffs.delete();
+      } catch (e) {
+        console.warn('Mat 解放中にエラー:', e);
+      }
     });
-
-    // ========= Entry point =========
-    // Bind UI + wire the start button FIRST (independent of library loading),
-    // then load OpenCV/MediaPipe. This guarantees the button is responsive
-    // even if a CDN is slow or fails.
-    function main(){
-      try{
-        initApp();     // UI binding + button wiring
-      }catch(e){
-        console.error("initApp error:", e);
-        const sd=document.getElementById("status");
-        if(sd) sd.textContent="初期化で一部エラー: "+(e&&e.message?e.message:e)+"（続行します）";
-        // IMPORTANT: do NOT return. boot() must still run so OpenCV initializes.
-      }
-      try{
-        boot();        // load/await OpenCV.js
-      }catch(e){
-        console.error("boot error:", e);
-        const sd=document.getElementById("status");
-        if(sd) sd.textContent="OpenCV起動エラー: "+(e&&e.message?e.message:e);
-      }
-    }
-
-    if(document.readyState==="loading"){
-      document.addEventListener("DOMContentLoaded", main, {once:true});
-    }else{
-      main();
-    }
   </script>
 </body>
 </html>
