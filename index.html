@@ -2,6 +2,15 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
+  <!--
+    外部スクリプト(opencv.js)の読み込みを許可するCSP。
+    GitHub Pages が default-src 'none' 等の制限的CSPを付ける場合があり、
+    それだと外部CDNのopencv.jsが読めずブロックされる。ここで明示的に許可する。
+    ただし meta の CSP は HTTPヘッダのCSPを「緩める」ことはできない仕様のため、
+    根本的にはリポジトリ側の設定変更が必要な場合がある（下の説明参照）。
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src *; img-src * data: blob:; style-src * 'unsafe-inline'; worker-src * blob:;">
   <title>AirGun ArUco v2 (OpenCV 4.10 / clean) - 2025</title>
   <style>
     body { margin:0; display:flex; flex-direction:row; height:100vh; background:#222; color:#eee; font-family:sans-serif; }
